@@ -4,16 +4,29 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser } from '../common/current-user.decorator';
 import { MoveCardRequestSchema, rankBetween, rankInitial } from '@kanban/shared';
 import { ZodValidationPipe } from '../common/zod-validation.pipe';
+import { EventsGateway } from '../events/events.gateway';
+import { randomUUID } from 'crypto';
 
 @UseGuards(JwtAuthGuard)
 @Controller('cards')
 export class CardsController {
-  constructor(private prisma: PrismaService) {}
+  // Cache in-memory LRU simples para idempotência baseada no clientRequestId (Exigência da Spec)
+  private idempotencyCache = new Map<string, any>();
+
+  constructor(private prisma: PrismaService, private eventsGateway: EventsGateway) {}
 
   @Post(':id/move')
   @UsePipes(new ZodValidationPipe(MoveCardRequestSchema))
   async moveCard(@Param('id') id: string, @Body() body: any, @CurrentUser() user: any) {
-    return this.prisma.$transaction(async (tx) => {
+    const cacheKey = `${user.sub}:${body.clientRequestId}`;
+    
+    // 1. Deduplicação: Se a mesma requisição do frontend chegar 2x, devolvemos a resposta cacheada sem mexer no banco
+    if (this.idempotencyCache.has(cacheKey)) {
+      return this.idempotencyCache.get(cacheKey);
+    }
+
+    // 2. Transação Atômica LWW no Banco de Dados (Calcula novo Rank Lexicográfico)
+    const result = await this.prisma.$transaction(async (tx) => {
       const card = await tx.card.findUnique({ where: { id } });
       if (!card || card.archivedAt) throw new NotFoundException('Card not found');
 
@@ -21,6 +34,8 @@ export class CardsController {
         where: { boardId: card.boardId, userId: user.sub, revokedAt: null }
       });
       if (!membership || membership.role === 'viewer') throw new ForbiddenException('Acesso negado');
+
+      const oldListId = card.listId;
 
       let beforeRank = null;
       let afterRank = null;
@@ -35,7 +50,6 @@ export class CardsController {
       }
 
       let newRank = card.rank;
-      // Se mudou de lista e não passou vizinhos, joga pro final da lista nova
       if (!beforeRank && !afterRank && body.toListId !== card.listId) {
          const lastCard = await tx.card.findFirst({
            where: { listId: body.toListId },
@@ -60,7 +74,7 @@ export class CardsController {
         data: { version: { increment: 1 } }
       });
 
-      // Grava o log de auditoria append-only exigido pela spec
+      // Auditoria Append-Only
       await tx.activityLog.create({
         data: {
           boardId: card.boardId,
@@ -68,11 +82,34 @@ export class CardsController {
           eventType: 'card.moved',
           entityType: 'card',
           entityId: card.id,
-          payload: { fromListId: card.listId, toListId: body.toListId, newRank, clientRequestId: body.clientRequestId }
+          payload: { fromListId: oldListId, toListId: body.toListId, newRank, clientRequestId: body.clientRequestId }
         }
       });
 
-      return { card: updatedCard, boardVersion: updatedBoard.version };
+      return { card: updatedCard, boardVersion: updatedBoard.version, fromListId: oldListId };
     });
+
+    const responsePayload = { card: result.card, boardVersion: result.boardVersion };
+    
+    // Grava no cache de Idempotência e limpa após 60 segundos
+    this.idempotencyCache.set(cacheKey, responsePayload);
+    setTimeout(() => this.idempotencyCache.delete(cacheKey), 60000);
+
+    // 3. Emissão Pós-Commit para o Motor WebSocket (O Broadcast)
+    this.eventsGateway.broadcast(result.card.boardId, 'card.moved', {
+      eventId: randomUUID(),
+      boardId: result.card.boardId,
+      boardVersion: result.boardVersion,
+      actorUserId: user.sub,
+      serverTime: new Date().toISOString(),
+      type: 'card.moved',
+      cardId: result.card.id,
+      fromListId: result.fromListId,
+      toListId: body.toListId,
+      newRank: result.card.rank,
+      cardVersion: result.card.version
+    });
+
+    return responsePayload;
   }
 }

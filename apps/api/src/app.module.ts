@@ -3,8 +3,9 @@ import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { BoardsModule } from './boards/boards.module';
 import { CardsModule } from './cards/cards.module';
+import { EventsModule } from './events/events.module';
 
 @Module({
-  imports: [PrismaModule, AuthModule, BoardsModule, CardsModule],
+  imports: [PrismaModule, AuthModule, EventsModule, BoardsModule, CardsModule],
 })
 export class AppModule {}

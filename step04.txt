@@ -1,0 +1,260 @@
+#!/bin/bash
+set -e
+
+echo "🚀 Iniciando Step 04: Motor de Tempo Real (Socket.IO Gateway)..."
+
+cd apps/api
+
+# 1. Instalar as dependências do Socket.IO e Cookies
+echo "📦 Instalando pacotes do Websocket..."
+pnpm add @nestjs/platform-socket.io @nestjs/websockets socket.io cookie
+pnpm add -D @types/cookie
+
+# 2. Criar a estrutura do Módulo de Eventos
+mkdir -p src/events
+
+cat << 'EOF' > src/events/events.gateway.ts
+import { WebSocketGateway, WebSocketServer, SubscribeMessage, ConnectedSocket, MessageBody, OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
+import { Server, Socket } from 'socket.io';
+import { JwtService } from '@nestjs/jwt';
+import { PrismaService } from '../prisma/prisma.service';
+import * as cookie from 'cookie';
+import { randomUUID } from 'crypto';
+
+@WebSocketGateway({ cors: { origin: 'http://localhost:3000', credentials: true } })
+export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
+  @WebSocketServer()
+  server!: Server;
+
+  constructor(private jwtService: JwtService, private prisma: PrismaService) {}
+
+  // Autenticação no aperto de mão (Handshake) usando cookie HttpOnly
+  async handleConnection(client: Socket) {
+    try {
+      const rawCookie = client.handshake.headers.cookie;
+      if (!rawCookie) throw new Error('Cookie não encontrado');
+      
+      const parsed = cookie.parse(rawCookie);
+      const token = parsed.accessToken;
+      if (!token) throw new Error('Token não encontrado');
+      
+      const payload = await this.jwtService.verifyAsync(token, { secret: 'kanban_secret_v2' });
+      client.data.user = payload; // Salva a sessão autenticada na conexão do socket
+    } catch (err) {
+      client.disconnect();
+    }
+  }
+
+  handleDisconnect(client: Socket) {
+    // Tratamento futuro de presença offline (fora do escopo MVP)
+  }
+
+  @SubscribeMessage('board.join')
+  async handleJoinBoard(@ConnectedSocket() client: Socket, @MessageBody() data: { boardId: string }) {
+    const user = client.data.user;
+    if (!user || !data?.boardId) return;
+
+    // Autorização: O usuário só entra na sala se tiver membership ativa (Regra da Spec)
+    const membership = await this.prisma.membership.findFirst({
+      where: { boardId: data.boardId, userId: user.sub, revokedAt: null }
+    });
+
+    if (membership) {
+      const roomName = `board:${data.boardId}`;
+      client.join(roomName);
+
+      // Snapshot obrigatório para sincronizar quem acabou de entrar ou reconectar
+      const board = await this.prisma.board.findFirst({
+        where: { id: data.boardId, archivedAt: null },
+        include: {
+          lists: { where: { archivedAt: null }, orderBy: { rank: 'asc' } },
+          cards: { where: { archivedAt: null }, orderBy: { rank: 'asc' } },
+          memberships: { where: { revokedAt: null } }
+        }
+      });
+
+      if (board) {
+        const { lists, cards, memberships, version, ...boardData } = board;
+        client.emit('board.snapshot', {
+          eventId: randomUUID(),
+          boardId: data.boardId,
+          boardVersion: version,
+          actorUserId: user.sub,
+          serverTime: new Date().toISOString(),
+          type: 'board.snapshot',
+          board: { ...boardData, version },
+          lists,
+          cards,
+          memberships
+        });
+      }
+    }
+  }
+
+  broadcast(boardId: string, eventType: string, payload: any) {
+    // Emite o evento restrito APENAS para a sala do board específico
+    this.server.to(`board:${boardId}`).emit(eventType, payload);
+  }
+}
+EOF
+
+cat << 'EOF' > src/events/events.module.ts
+import { Global, Module } from '@nestjs/common';
+import { EventsGateway } from './events.gateway';
+
+@Global()
+@Module({
+  providers: [EventsGateway],
+  exports: [EventsGateway],
+})
+export class EventsModule {}
+EOF
+
+# 3. Atualizar o AppModule para carregar o módulo global de Eventos
+cat << 'EOF' > src/app.module.ts
+import { Module } from '@nestjs/common';
+import { PrismaModule } from './prisma/prisma.module';
+import { AuthModule } from './auth/auth.module';
+import { BoardsModule } from './boards/boards.module';
+import { CardsModule } from './cards/cards.module';
+import { EventsModule } from './events/events.module';
+
+@Module({
+  imports: [PrismaModule, AuthModule, EventsModule, BoardsModule, CardsModule],
+})
+export class AppModule {}
+EOF
+
+# 4. Refatorar o CardsController com Cache LRU (Idempotência) e Emissão Transacional
+cat << 'EOF' > src/cards/cards.controller.ts
+import { Controller, Post, Param, Body, UseGuards, UsePipes, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { CurrentUser } from '../common/current-user.decorator';
+import { MoveCardRequestSchema, rankBetween, rankInitial } from '@kanban/shared';
+import { ZodValidationPipe } from '../common/zod-validation.pipe';
+import { EventsGateway } from '../events/events.gateway';
+import { randomUUID } from 'crypto';
+
+@UseGuards(JwtAuthGuard)
+@Controller('cards')
+export class CardsController {
+  // Cache in-memory LRU simples para idempotência baseada no clientRequestId (Exigência da Spec)
+  private idempotencyCache = new Map<string, any>();
+
+  constructor(private prisma: PrismaService, private eventsGateway: EventsGateway) {}
+
+  @Post(':id/move')
+  @UsePipes(new ZodValidationPipe(MoveCardRequestSchema))
+  async moveCard(@Param('id') id: string, @Body() body: any, @CurrentUser() user: any) {
+    const cacheKey = `${user.sub}:${body.clientRequestId}`;
+    
+    // 1. Deduplicação: Se a mesma requisição do frontend chegar 2x, devolvemos a resposta cacheada sem mexer no banco
+    if (this.idempotencyCache.has(cacheKey)) {
+      return this.idempotencyCache.get(cacheKey);
+    }
+
+    // 2. Transação Atômica LWW no Banco de Dados (Calcula novo Rank Lexicográfico)
+    const result = await this.prisma.$transaction(async (tx) => {
+      const card = await tx.card.findUnique({ where: { id } });
+      if (!card || card.archivedAt) throw new NotFoundException('Card not found');
+
+      const membership = await tx.membership.findFirst({
+        where: { boardId: card.boardId, userId: user.sub, revokedAt: null }
+      });
+      if (!membership || membership.role === 'viewer') throw new ForbiddenException('Acesso negado');
+
+      const oldListId = card.listId;
+
+      let beforeRank = null;
+      let afterRank = null;
+
+      if (body.beforeCardId) {
+        const bCard = await tx.card.findUnique({ where: { id: body.beforeCardId } });
+        if (bCard) beforeRank = bCard.rank;
+      }
+      if (body.afterCardId) {
+        const aCard = await tx.card.findUnique({ where: { id: body.afterCardId } });
+        if (aCard) afterRank = aCard.rank;
+      }
+
+      let newRank = card.rank;
+      if (!beforeRank && !afterRank && body.toListId !== card.listId) {
+         const lastCard = await tx.card.findFirst({
+           where: { listId: body.toListId },
+           orderBy: { rank: 'desc' }
+         });
+         newRank = lastCard ? rankBetween(lastCard.rank, null) : rankInitial();
+      } else if (body.beforeCardId || body.afterCardId) {
+         newRank = rankBetween(beforeRank, afterRank);
+      }
+
+      const updatedCard = await tx.card.update({
+        where: { id },
+        data: {
+          listId: body.toListId,
+          rank: newRank,
+          version: { increment: 1 },
+        }
+      });
+
+      const updatedBoard = await tx.board.update({
+        where: { id: card.boardId },
+        data: { version: { increment: 1 } }
+      });
+
+      // Auditoria Append-Only
+      await tx.activityLog.create({
+        data: {
+          boardId: card.boardId,
+          actorUserId: user.sub,
+          eventType: 'card.moved',
+          entityType: 'card',
+          entityId: card.id,
+          payload: { fromListId: oldListId, toListId: body.toListId, newRank, clientRequestId: body.clientRequestId }
+        }
+      });
+
+      return { card: updatedCard, boardVersion: updatedBoard.version, fromListId: oldListId };
+    });
+
+    const responsePayload = { card: result.card, boardVersion: result.boardVersion };
+    
+    // Grava no cache de Idempotência e limpa após 60 segundos
+    this.idempotencyCache.set(cacheKey, responsePayload);
+    setTimeout(() => this.idempotencyCache.delete(cacheKey), 60000);
+
+    // 3. Emissão Pós-Commit para o Motor WebSocket (O Broadcast)
+    this.eventsGateway.broadcast(result.card.boardId, 'card.moved', {
+      eventId: randomUUID(),
+      boardId: result.card.boardId,
+      boardVersion: result.boardVersion,
+      actorUserId: user.sub,
+      serverTime: new Date().toISOString(),
+      type: 'card.moved',
+      cardId: result.card.id,
+      fromListId: result.fromListId,
+      toListId: body.toListId,
+      newRank: result.card.rank,
+      cardVersion: result.card.version
+    });
+
+    return responsePayload;
+  }
+}
+EOF
+
+# 5. Build, verificação e commit
+echo "🏗️ Compilando a API NestJS para garantir o Definition of Done..."
+pnpm run build
+
+cd ../..
+git config core.filemode false || true
+git add .
+git commit -m "feat(step-04): realtime socket.io gateway, ws auth and idempotency" || true
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 STEP 04 CONCLUÍDO COM SUCESSO!"
+echo "Motor WebSocket implementado, protegido e plugado nas Controllers."
+echo "✅=========================================================="
