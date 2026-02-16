@@ -1,0 +1,369 @@
+#!/bin/bash
+set -e
+
+echo "🚀 Iniciando Step 05: Frontend Setup (Next.js, Tailwind, React Query & Auth)..."
+
+mkdir -p apps/web
+cd apps/web
+
+# 1. Atualizar package.json
+cat << 'EOF' > package.json
+{
+  "name": "web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dnd-kit/core": "^6.1.0",
+    "@dnd-kit/sortable": "^8.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "@kanban/shared": "workspace:*",
+    "@tanstack/react-query": "^5.24.1",
+    "axios": "^1.6.7",
+    "lucide-react": "^0.344.0",
+    "next": "14.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "socket.io-client": "^4.7.4",
+    "clsx": "^2.1.0",
+    "tailwind-merge": "^2.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.2.55",
+    "@types/react-dom": "^18.2.19",
+    "autoprefixer": "^10.4.17",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.3.3"
+  }
+}
+EOF
+
+cat << 'EOF' > tsconfig.json
+{
+  "compilerOptions": {
+    "target": "es5",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [{ "name": "next" }],
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+EOF
+
+cat << 'EOF' > postcss.config.js
+module.exports = {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
+EOF
+
+cat << 'EOF' > tailwind.config.ts
+import type { Config } from 'tailwindcss';
+
+const config: Config = {
+  content: [
+    './src/app/**/*.{js,ts,jsx,tsx,mdx}',
+    './src/components/**/*.{js,ts,jsx,tsx,mdx}',
+  ],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+};
+export default config;
+EOF
+
+cat << 'EOF' > next.config.js
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  transpilePackages: ['@kanban/shared'],
+};
+module.exports = nextConfig;
+EOF
+
+# 2. Estrutura de Pastas
+mkdir -p src/app/login src/app/board/\[id\] src/components src/lib
+
+cat << 'EOF' > src/lib/api.ts
+import axios from 'axios';
+
+export const api = axios.create({
+  baseURL: 'http://localhost:3001',
+  withCredentials: true,
+});
+EOF
+
+cat << 'EOF' > src/components/Providers.tsx
+'use client';
+
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useState } from 'react';
+
+export default function Providers({ children }: { children: React.ReactNode }) {
+  const [queryClient] = useState(() => new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: 1,
+        refetchOnWindowFocus: false,
+      },
+    },
+  }));
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      {children}
+    </QueryClientProvider>
+  );
+}
+EOF
+
+cat << 'EOF' > src/app/globals.css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #f8fafc;
+  color: #0f172a;
+}
+EOF
+
+cat << 'EOF' > src/app/layout.tsx
+import './globals.css';
+import Providers from '../components/Providers';
+
+export const metadata = {
+  title: 'Kanban v2',
+  description: 'Sistema Kanban Colaborativo',
+};
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="pt-BR">
+      <body>
+        <Providers>
+          {children}
+        </Providers>
+      </body>
+    </html>
+  );
+}
+EOF
+
+cat << 'EOF' > src/app/login/page.tsx
+'use client';
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import { LoginRequestSchema } from '@kanban/shared';
+
+export default function LoginPage() {
+  const [email, setEmail] = useState('owner@kanban.com');
+  const [password, setPassword] = useState('123456');
+  const [error, setError] = useState('');
+  const router = useRouter();
+  const queryClient = useQueryClient();
+
+  const loginMutation = useMutation({
+    mutationFn: async () => {
+      const validData = LoginRequestSchema.parse({ email, password });
+      const { data } = await api.post('/auth/login', validData);
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['me'] });
+      router.push('/');
+    },
+    onError: () => setError('Credenciais inválidas. Verifique e tente novamente.'),
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    loginMutation.mutate();
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-slate-100">
+      <div className="max-w-md w-full p-8 bg-white rounded-xl shadow-lg border border-slate-200">
+        <h2 className="text-3xl font-bold text-center text-slate-900 mb-8">Kanban v2</h2>
+        {error && <div className="mb-4 p-3 bg-red-50 text-red-600 rounded-lg text-sm font-medium text-center">{error}</div>}
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">E-mail</label>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition"
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Senha</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition"
+              required
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={loginMutation.isPending}
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg transition-colors disabled:opacity-50"
+          >
+            {loginMutation.isPending ? 'Autenticando...' : 'Entrar'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+EOF
+
+cat << 'EOF' > src/app/page.tsx
+'use client';
+
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import { useRouter } from 'next/navigation';
+import { LayoutDashboard, Users, LogOut } from 'lucide-react';
+import Link from 'next/link';
+import { useEffect } from 'react';
+
+export default function DashboardPage() {
+  const router = useRouter();
+  const queryClient = useQueryClient();
+
+  const { data: user, isError: userError, isLoading: userLoading } = useQuery({
+    queryKey: ['me'],
+    queryFn: async () => {
+      const res = await api.get('/me');
+      return res.data.user;
+    },
+    retry: false
+  });
+
+  const { data: boards, isLoading: boardsLoading } = useQuery({
+    queryKey: ['boards'],
+    queryFn: async () => {
+      const res = await api.get('/boards');
+      return res.data;
+    },
+    enabled: !!user
+  });
+
+  useEffect(() => {
+    if (userError) router.replace('/login');
+  }, [userError, router]);
+
+  const handleLogout = async () => {
+    await api.post('/auth/logout');
+    queryClient.clear();
+    router.replace('/login');
+  };
+
+  if (userLoading || boardsLoading) {
+    return <div className="min-h-screen flex items-center justify-center text-slate-500 font-medium">Carregando...</div>;
+  }
+
+  if (!user) return null;
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col">
+      <header className="bg-white border-b px-6 py-4 flex items-center justify-between shadow-sm">
+        <div className="flex items-center gap-2 text-blue-600">
+          <LayoutDashboard size={24} />
+          <h1 className="text-xl font-bold text-slate-900">Kanban v2</h1>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 text-sm text-slate-600 bg-slate-100 px-3 py-1.5 rounded-full">
+            <Users size={16} />
+            <span className="font-medium">{user.name}</span>
+          </div>
+          <button onClick={handleLogout} className="text-slate-500 hover:text-red-600 transition-colors" title="Sair">
+            <LogOut size={20} />
+          </button>
+        </div>
+      </header>
+
+      <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-10">
+        <h2 className="text-2xl font-bold text-slate-900 mb-6">Meus Quadros</h2>
+        
+        {boards?.length === 0 ? (
+          <div className="bg-white border border-dashed border-slate-300 rounded-xl p-12 text-center">
+            <p className="text-slate-500">Você ainda não participa de nenhum quadro.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {boards?.map((board: any) => (
+              <Link 
+                key={board.id} 
+                href={`/board/${board.id}`}
+                className="group block bg-white border border-slate-200 rounded-xl p-6 shadow-sm hover:shadow-md hover:border-blue-500 transition-all cursor-pointer"
+              >
+                <h3 className="text-lg font-semibold text-slate-900 mb-2">{board.name}</h3>
+                <p className="text-sm text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity">
+                  Acessar quadro colaborativo &rarr;
+                </p>
+              </Link>
+            ))}
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+EOF
+
+cat << 'EOF' > src/app/board/\[id\]/page.tsx
+export default function BoardPage() {
+  return <div className="p-8 font-medium">Carregando Tela do Quadro (Implementaremos no Step 06)...</div>;
+}
+EOF
+
+# 4. Instalar, Validar (Build) e Commitar
+cd ../..
+echo "📦 Instalando as dependências do Frontend Workspace..."
+pnpm install
+
+echo "🏗️ Compilando o Frontend Next.js para validar o Definition of Done..."
+cd apps/web
+pnpm run build
+cd ../..
+
+git config core.filemode false || true
+git add .
+git commit -m "feat(step-05): setup frontend nextjs, react query and dashboard auth" || true
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 STEP 05 CONCLUÍDO COM SUCESSO!"
+echo "Aplicação Frontend configurada, tipada e compilada."
+echo "✅=========================================================="
