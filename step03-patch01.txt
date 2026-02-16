@@ -1,0 +1,41 @@
+#!/bin/bash
+set -e
+
+echo "🔧 Aplicando Patch: Corrigindo import do cookie-parser e gerando Prisma Client..."
+
+# 1. Corrige o import no main.ts
+cat << 'EOF' > apps/api/src/main.ts
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import cookieParser from 'cookie-parser';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  app.use(cookieParser());
+  app.enableCors({ origin: 'http://localhost:3000', credentials: true });
+  await app.listen(3001);
+  console.log('🚀 NestJS API rodando em http://localhost:3001');
+}
+bootstrap();
+EOF
+
+cd apps/api
+
+# 2. Força a geração do Prisma Client
+echo "⚙️ Forçando a geração do Prisma Client..."
+pnpm exec prisma generate
+
+# 3. Recompila a API NestJS para provar o "Definition of Done"
+echo "🏗️ Recompilando a API NestJS..."
+pnpm run build
+
+# 4. Finaliza com o commit
+cd ../..
+git add .
+git commit -m "fix(step-03): resolve cookie-parser import and generate prisma client" || true
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 STEP 03 CORRIGIDO E CONCLUÍDO COM SUCESSO!"
+echo "API compilou sem erros e Prisma Client gerado."
+echo "✅=========================================================="

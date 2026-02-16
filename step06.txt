@@ -1,0 +1,494 @@
+#!/bin/bash
+set -e
+
+echo "🚀 Iniciando Step 06: Motor Drag & Drop Otimista e Kanban Backend..."
+
+# ==========================================
+# 1. CRIANDO O MÓDULO KANBAN NO BACKEND
+# ==========================================
+echo "🔧 Injetando KanbanModule no NestJS..."
+mkdir -p apps/api/src/kanban
+
+cat << 'EOF' > apps/api/src/kanban/kanban.controller.ts
+import { Controller, Get, Post, Body, Patch, Param, UseGuards } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { EventsGateway } from '../events/events.gateway';
+
+@UseGuards(JwtAuthGuard)
+@Controller('kanban')
+export class KanbanController {
+  constructor(private prisma: PrismaService, private events: EventsGateway) {}
+
+  @Get('board/:id')
+  async getBoard(@Param('id') id: string) {
+    return this.prisma.board.findUnique({
+      where: { id },
+      include: {
+        columns: {
+          include: { tasks: { orderBy: { order: 'asc' } } },
+          orderBy: { order: 'asc' }
+        }
+      }
+    });
+  }
+
+  @Post('columns')
+  async createColumn(@Body() body: { title: string; boardId: string; order: number }) {
+    const col = await this.prisma.column.create({ data: body });
+    this.events.server.emit('boardUpdated', { boardId: col.boardId });
+    return col;
+  }
+
+  @Post('tasks')
+  async createTask(@Body() body: { title: string; columnId: string; order: number }) {
+    const task = await this.prisma.task.create({ data: body });
+    const col = await this.prisma.column.findUnique({ where: { id: task.columnId } });
+    if (col) this.events.server.emit('boardUpdated', { boardId: col.boardId });
+    return task;
+  }
+
+  @Patch('tasks/:id')
+  async updateTask(@Param('id') id: string, @Body() body: { columnId?: string; order?: number }) {
+    const task = await this.prisma.task.update({ where: { id }, data: body });
+    const col = await this.prisma.column.findUnique({ where: { id: task.columnId } });
+    if (col) this.events.server.emit('boardUpdated', { boardId: col.boardId });
+    return task;
+  }
+}
+EOF
+
+cat << 'EOF' > apps/api/src/events/events.module.ts
+import { Module } from '@nestjs/common';
+import { EventsGateway } from './events.gateway';
+
+@Module({
+  providers: [EventsGateway],
+  exports: [EventsGateway]
+})
+export class EventsModule {}
+EOF
+
+cat << 'EOF' > apps/api/src/kanban/kanban.module.ts
+import { Module } from '@nestjs/common';
+import { KanbanController } from './kanban.controller';
+import { PrismaModule } from '../prisma/prisma.module';
+import { EventsModule } from '../events/events.module';
+
+@Module({
+  imports: [PrismaModule, EventsModule],
+  controllers: [KanbanController],
+})
+export class KanbanModule {}
+EOF
+
+node -e "
+const fs = require('fs');
+const appModulePath = 'apps/api/src/app.module.ts';
+if (fs.existsSync(appModulePath)) {
+  let content = fs.readFileSync(appModulePath, 'utf8');
+  if (!content.includes('KanbanModule')) {
+    content = \"import { KanbanModule } from './kanban/kanban.module';\n\" + content;
+    content = content.replace(/imports:\s*\[/, \"imports: [\n    KanbanModule,\");
+    fs.writeFileSync(appModulePath, content);
+  }
+}
+"
+
+# ==========================================
+# 2. CONSTRUINDO A INTERFACE REACT NO FRONTEND
+# ==========================================
+echo "🎨 Configurando o UI dnd-kit e o WebSocket Client..."
+mkdir -p apps/web/src/components/board
+
+# Componente: TaskCard
+cat << 'EOF' > apps/web/src/components/board/TaskCard.tsx
+import { useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { GripVertical } from 'lucide-react';
+
+export function TaskCard({ task, isOverlay }: { task: any, isOverlay?: boolean }) {
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({
+    id: task.id,
+    data: { type: 'Task', task }
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging && !isOverlay ? 0.3 : 1,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`bg-white p-3 rounded-xl shadow-sm border ${isOverlay ? 'border-blue-500 shadow-xl rotate-2 scale-105' : 'border-slate-200 hover:border-blue-300'} mb-3 flex gap-2 items-start`}
+    >
+      <div {...attributes} {...listeners} className="mt-0.5 text-slate-300 hover:text-slate-500 cursor-grab active:cursor-grabbing outline-none touch-none">
+        <GripVertical size={16} />
+      </div>
+      <div>
+        <p className="text-sm font-medium text-slate-800 leading-snug">{task.title}</p>
+      </div>
+    </div>
+  );
+}
+EOF
+
+# Componente: Column
+cat << 'EOF' > apps/web/src/components/board/Column.tsx
+import { useDroppable } from '@dnd-kit/core';
+import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { TaskCard } from './TaskCard';
+import { useState } from 'react';
+import { Plus } from 'lucide-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+
+export function Column({ column, boardId }: { column: any, boardId: string }) {
+  const { setNodeRef } = useDroppable({ id: column.id, data: { type: 'Column', column } });
+  const [isAdding, setIsAdding] = useState(false);
+  const [title, setTitle] = useState('');
+  const queryClient = useQueryClient();
+
+  const addTaskMutation = useMutation({
+    mutationFn: async (t: string) => {
+      const order = column.tasks?.length > 0 ? column.tasks[column.tasks.length - 1].order + 1000 : 1000;
+      await api.post('/kanban/tasks', { title: t, columnId: column.id, order });
+    },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['board', boardId] }); setIsAdding(false); setTitle(''); }
+  });
+
+  return (
+    <div className="bg-slate-100/90 rounded-2xl w-[320px] shrink-0 flex flex-col max-h-full border border-slate-200 shadow-sm">
+      <div className="p-4 flex items-center justify-between border-b border-slate-200/60 bg-slate-100/50 rounded-t-2xl">
+        <h3 className="font-semibold text-slate-800 tracking-tight">{column.title}</h3>
+        <span className="bg-white border border-slate-200 text-slate-600 text-xs px-2 py-0.5 rounded-full font-bold">{column.tasks?.length || 0}</span>
+      </div>
+      <div ref={setNodeRef} className="flex-1 overflow-y-auto p-3 min-h-[150px] scrollbar-thin">
+        <SortableContext items={(column.tasks || []).map((t: any) => t.id)} strategy={verticalListSortingStrategy}>
+          {(column.tasks || []).map((task: any) => (
+            <TaskCard key={task.id} task={task} />
+          ))}
+        </SortableContext>
+        {isAdding ? (
+          <form onSubmit={(e) => { e.preventDefault(); if (title.trim()) addTaskMutation.mutate(title); }} className="mt-1">
+            <input autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="O que será feito?" className="w-full text-sm px-3 py-2.5 border border-slate-300 shadow-sm rounded-xl outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all" />
+            <div className="flex gap-2 mt-2">
+              <button type="submit" disabled={addTaskMutation.isPending} className="bg-blue-600 text-white text-xs px-4 py-2 rounded-lg hover:bg-blue-700 font-medium transition-colors">Salvar</button>
+              <button type="button" onClick={() => setIsAdding(false)} className="text-slate-500 hover:text-slate-800 hover:bg-slate-200 text-xs px-3 py-2 rounded-lg font-medium transition-colors">Cancelar</button>
+            </div>
+          </form>
+        ) : (
+          <button onClick={() => setIsAdding(true)} className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-800 w-full p-2.5 hover:bg-slate-200/70 border border-dashed border-transparent hover:border-slate-300 rounded-xl transition-all mt-1 font-medium">
+            <Plus size={18} /> Adicionar Cartão
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+EOF
+
+# Componente: Board (Motor Principal)
+cat << 'EOF' > apps/web/src/components/board/Board.tsx
+'use client';
+
+import { useState, useEffect } from 'react';
+import { DndContext, DragOverlay, closestCorners, PointerSensor, useSensor, useSensors, DragStartEvent, DragOverEvent, DragEndEvent } from '@dnd-kit/core';
+import { arrayMove } from '@dnd-kit/sortable';
+import { Column } from './Column';
+import { TaskCard } from './TaskCard';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import { Plus } from 'lucide-react';
+import { io } from 'socket.io-client';
+
+export function calcPos(prevOrder?: number, nextOrder?: number): number {
+  if (prevOrder === undefined && nextOrder === undefined) return 1000;
+  if (prevOrder === undefined) return nextOrder! / 2;
+  if (nextOrder === undefined) return prevOrder! + 1000;
+  return (prevOrder + nextOrder) / 2;
+}
+
+export function Board({ initialData }: { initialData: any }) {
+  const [board, setBoard] = useState(initialData);
+  const [activeTask, setActiveTask] = useState<any>(null);
+  const queryClient = useQueryClient();
+
+  useEffect(() => { setBoard(initialData); }, [initialData]);
+
+  // Tempo Real / WebSockets Setup
+  useEffect(() => {
+    const socket = io('http://localhost:3001', { withCredentials: true, transports: ['websocket'] });
+    socket.on('boardUpdated', () => queryClient.invalidateQueries({ queryKey: ['board', board.id] }));
+    return () => { socket.disconnect(); };
+  }, [board.id, queryClient]);
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+
+  const moveTaskMutation = useMutation({
+    mutationFn: async ({ taskId, data }: { taskId: string; data: any }) => {
+      await api.patch(`/kanban/tasks/${taskId}`, data);
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['board', board.id] })
+  });
+
+  const addColumnMutation = useMutation({
+    mutationFn: async (title: string) => {
+      const order = board.columns?.length > 0 ? board.columns[board.columns.length - 1].order + 1000 : 1000;
+      await api.post('/kanban/columns', { title, boardId: board.id, order });
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board', board.id] })
+  });
+
+  const handleDragStart = (e: DragStartEvent) => {
+    if (e.active.data.current?.type === 'Task') setActiveTask(e.active.data.current.task);
+  };
+
+  const handleDragOver = (e: DragOverEvent) => {
+    const { active, over } = e;
+    if (!over || active.id === over.id || active.data.current?.type !== 'Task') return;
+
+    const isOverColumn = over.data.current?.type === 'Column';
+
+    setBoard((prev: any) => {
+      const activeColIndex = (prev.columns || []).findIndex((col: any) => (col.tasks || []).some((t: any) => t.id === active.id));
+      const overColIndex = isOverColumn 
+        ? (prev.columns || []).findIndex((col: any) => col.id === over.id)
+        : (prev.columns || []).findIndex((col: any) => (col.tasks || []).some((t: any) => t.id === over.id));
+
+      if (activeColIndex === -1 || overColIndex === -1 || activeColIndex === overColIndex) return prev;
+
+      const newCols = [...prev.columns];
+      const taskObj = newCols[activeColIndex].tasks.find((t: any) => t.id === active.id);
+
+      // Remove da origem
+      newCols[activeColIndex] = { ...newCols[activeColIndex], tasks: newCols[activeColIndex].tasks.filter((t: any) => t.id !== active.id) };
+      
+      // Insere no destino
+      const newOverTasks = [...newCols[overColIndex].tasks];
+      if (isOverColumn) {
+        newOverTasks.push({ ...taskObj, columnId: newCols[overColIndex].id });
+      } else {
+        const overTaskIndex = newOverTasks.findIndex((t: any) => t.id === over.id);
+        const modifier = (over && active.rect.current.translated && active.rect.current.translated.top > over.rect.top + over.rect.height) ? 1 : 0;
+        newOverTasks.splice(overTaskIndex + modifier, 0, { ...taskObj, columnId: newCols[overColIndex].id });
+      }
+      newCols[overColIndex] = { ...newCols[overColIndex], tasks: newOverTasks };
+      
+      return { ...prev, columns: newCols };
+    });
+  };
+
+  const handleDragEnd = (e: DragEndEvent) => {
+    setActiveTask(null);
+    const { active, over } = e;
+    if (!over) return;
+
+    const activeCol = (board.columns || []).find((col: any) => (col.tasks || []).some((t: any) => t.id === active.id));
+    const overCol = (board.columns || []).find((col: any) => col.id === over.id) || (board.columns || []).find((col: any) => (col.tasks || []).some((t: any) => t.id === over.id));
+
+    if (!activeCol || !overCol) return;
+
+    let finalTasks = [...overCol.tasks];
+    let newIndex = finalTasks.findIndex((t: any) => t.id === active.id);
+
+    if (activeCol.id === overCol.id) {
+       const oldIndex = finalTasks.findIndex((t: any) => t.id === active.id);
+       const overIndex = finalTasks.findIndex((t: any) => t.id === over.id);
+       if (oldIndex !== overIndex) {
+           finalTasks = arrayMove(finalTasks, oldIndex, overIndex);
+           newIndex = overIndex;
+           setBoard((prev: any) => ({
+             ...prev, columns: prev.columns.map((c: any) => c.id === overCol.id ? { ...c, tasks: finalTasks } : c)
+           }));
+       }
+    }
+
+    const targetTask = finalTasks[newIndex];
+    if (!targetTask) return;
+
+    const prevOrder = finalTasks[newIndex - 1]?.order;
+    const nextOrder = finalTasks[newIndex + 1]?.order;
+    const newOrder = calcPos(prevOrder, nextOrder);
+    
+    // Dispara a mutação para a API se a ordem ou coluna mudou
+    if (activeCol.id !== overCol.id || newOrder !== targetTask.order) {
+       moveTaskMutation.mutate({ taskId: active.id as string, data: { columnId: overCol.id, order: newOrder } });
+    }
+  };
+
+  return (
+    <DndContext sensors={sensors} collisionDetection={closestCorners} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
+      <div className="flex gap-6 h-full items-start overflow-x-auto pb-4">
+        {(board.columns || []).map((col: any) => (
+          <Column key={col.id} column={col} boardId={board.id} />
+        ))}
+        <button 
+          onClick={() => { const t = prompt('Nome da Nova Lista:'); if(t && t.trim()) addColumnMutation.mutate(t); }}
+          className="shrink-0 w-80 bg-slate-200/50 hover:bg-white border-2 border-dashed border-slate-300 hover:border-blue-400 hover:text-blue-600 rounded-2xl flex items-center justify-center gap-2 text-slate-500 font-medium transition-all h-[100px]"
+        >
+          <Plus size={20} /> Criar Nova Lista
+        </button>
+      </div>
+      <DragOverlay>
+        {activeTask ? <TaskCard task={activeTask} isOverlay /> : null}
+      </DragOverlay>
+    </DndContext>
+  );
+}
+EOF
+
+# Substituir a View Provisória da Tela do Quadro
+cat << 'EOF' > apps/web/src/app/board/\[id\]/page.tsx
+'use client';
+
+import { useQuery } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import { Board } from '@/components/board/Board';
+import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { ArrowLeft, Loader2, LayoutDashboard } from 'lucide-react';
+import { useEffect } from 'react';
+
+export default function BoardPage() {
+  const { id } = useParams();
+  const router = useRouter();
+  
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['board', id],
+    queryFn: async () => {
+      const res = await api.get(`/kanban/board/${id}`);
+      return res.data;
+    },
+    retry: false
+  });
+
+  useEffect(() => {
+    if (isError) router.replace('/');
+  }, [isError, router]);
+
+  if (isLoading) return <div className="min-h-screen bg-slate-50 flex items-center justify-center text-slate-500 font-medium gap-3"><Loader2 className="animate-spin text-blue-500" size={28} /> Sincronizando quadro colaborativo...</div>;
+  if (!data) return null;
+
+  return (
+    <div className="h-screen bg-slate-50 flex flex-col overflow-hidden">
+      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm shrink-0 z-10">
+        <div className="flex items-center gap-4">
+          <Link href="/" className="text-slate-400 hover:text-blue-600 transition-colors p-2 hover:bg-blue-50 rounded-full">
+            <ArrowLeft size={20} />
+          </Link>
+          <div className="h-6 w-px bg-slate-200"></div>
+          <div className="flex items-center gap-2 text-blue-600">
+            <LayoutDashboard size={24} />
+            <h1 className="text-xl font-bold text-slate-900 tracking-tight">{data.name}</h1>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-full text-xs font-bold text-emerald-700 shadow-sm">
+          <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" /> Sincronização em Tempo Real
+        </div>
+      </header>
+      <main className="flex-1 p-6 overflow-x-auto overflow-y-hidden bg-[url('https://www.transparenttextures.com/patterns/cubes.png')]">
+        <Board initialData={data} />
+      </main>
+    </div>
+  );
+}
+EOF
+
+# Atualizar a Home para permitir criar quadros
+cat << 'EOF' > apps/web/src/app/page.tsx
+'use client';
+
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import { useRouter } from 'next/navigation';
+import { LayoutDashboard, Users, LogOut, Plus } from 'lucide-react';
+import Link from 'next/link';
+import { useEffect } from 'react';
+
+export default function DashboardPage() {
+  const router = useRouter();
+  const queryClient = useQueryClient();
+
+  const { data: user, isError: userError, isLoading: userLoading } = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get('/me')).data.user, retry: false });
+  const { data: boards, isLoading: boardsLoading } = useQuery({ queryKey: ['boards'], queryFn: async () => (await api.get('/boards')).data, enabled: !!user });
+
+  const createBoardMutation = useMutation({
+    mutationFn: async (name: string) => await api.post('/boards', { name }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['boards'] })
+  });
+
+  useEffect(() => { if (userError) router.replace('/login'); }, [userError, router]);
+
+  const handleCreateBoard = () => {
+    const name = window.prompt('Qual o nome do novo projeto/quadro?');
+    if (name?.trim()) createBoardMutation.mutate(name.trim());
+  };
+
+  if (userLoading || boardsLoading) return <div className="min-h-screen flex items-center justify-center text-slate-500 font-medium">Carregando ambiente...</div>;
+  if (!user) return null;
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col">
+      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm">
+        <div className="flex items-center gap-2 text-blue-600">
+          <LayoutDashboard size={24} />
+          <h1 className="text-xl font-bold text-slate-900">Kanban v2</h1>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 text-sm text-slate-600 bg-slate-100 px-3 py-1.5 rounded-full font-medium">
+            <Users size={16} /> {user.name}
+          </div>
+          <button onClick={async () => { await api.post('/auth/logout'); queryClient.clear(); router.replace('/login'); }} className="text-slate-500 hover:text-red-600 transition-colors p-2"><LogOut size={20} /></button>
+        </div>
+      </header>
+
+      <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-10">
+        <div className="flex items-center justify-between mb-8">
+          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Meus Projetos</h2>
+          <button onClick={handleCreateBoard} disabled={createBoardMutation.isPending} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-xl font-medium transition-all shadow-sm">
+            <Plus size={20} /> Novo Quadro
+          </button>
+        </div>
+        
+        {boards?.length === 0 ? (
+          <div className="bg-white border border-dashed border-slate-300 rounded-2xl p-16 flex flex-col items-center text-center">
+            <LayoutDashboard size={48} className="text-slate-300 mb-4" />
+            <h3 className="text-lg font-semibold text-slate-700">Nenhum quadro encontrado</h3>
+            <p className="text-slate-500 mt-1 max-w-sm">Você ainda não tem nenhum projeto em andamento. Clique no botão acima para criar o seu primeiro quadro e comece a organizar suas tarefas!</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+            {boards?.map((board: any) => (
+              <Link key={board.id} href={`/board/${board.id}`} className="group flex flex-col bg-white border border-slate-200 rounded-2xl p-6 shadow-sm hover:shadow-md hover:border-blue-400 transition-all cursor-pointer">
+                <div className="w-10 h-10 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center mb-4 group-hover:bg-blue-600 group-hover:text-white transition-colors"><LayoutDashboard size={20} /></div>
+                <h3 className="text-lg font-semibold text-slate-900 mb-1">{board.name}</h3>
+                <p className="text-sm text-slate-500 mt-auto pt-4 flex items-center gap-1 group-hover:text-blue-600 transition-colors font-medium">Acessar quadro &rarr;</p>
+              </Link>
+            ))}
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+EOF
+
+# 3. Validar a build e garantir que tudo está funcional
+echo "🏗️ Realizando Build Completa para validar integração..."
+cd apps/api && pnpm run build
+cd ../web && pnpm run build
+cd ../..
+
+git config core.filemode false || true
+git add .
+git commit -m "feat(step-06): core kanban engine with dnd-kit, optimistic UI and websockets" || true
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 STEP 06 CONCLUÍDO COM SUCESSO!"
+echo "Motor Interativo de Drag & Drop no ar com Sincronização Automática."
+echo "✅=========================================================="

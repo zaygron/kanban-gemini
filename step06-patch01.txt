@@ -1,0 +1,93 @@
+#!/bin/bash
+set -e
+
+echo "🔧 Corrigindo o KanbanController (Tradução de Models e Auth Guard)..."
+
+cat << 'EOF' > apps/api/src/kanban/kanban.controller.ts
+import { Controller, Get, Post, Body, Patch, Param, UseGuards } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { JwtAuthGuard } from '../auth/jwt.guard';
+import { EventsGateway } from '../events/events.gateway';
+
+@UseGuards(JwtAuthGuard)
+@Controller('kanban')
+export class KanbanController {
+  constructor(private prisma: PrismaService, private events: EventsGateway) {}
+
+  @Get('board/:id')
+  async getBoard(@Param('id') id: string) {
+    const board = await this.prisma.board.findUnique({
+      where: { id },
+      include: {
+        lists: {
+          include: { cards: { orderBy: { order: 'asc' } } },
+          orderBy: { order: 'asc' }
+        }
+      }
+    });
+
+    if (!board) return null;
+
+    // Mapeamos 'lists' e 'cards' do banco para 'columns' e 'tasks' que o Frontend espera
+    return {
+      ...board,
+      columns: board.lists.map(list => ({
+        id: list.id,
+        title: list.name,
+        order: list.order,
+        boardId: list.boardId,
+        tasks: list.cards.map(card => ({
+          id: card.id,
+          title: card.title,
+          order: card.order,
+          columnId: card.listId
+        }))
+      }))
+    };
+  }
+
+  @Post('columns')
+  async createColumn(@Body() body: { title: string; boardId: string; order: number }) {
+    // Frontend manda 'columns', nós salvamos no Prisma como 'List'
+    const list = await this.prisma.list.create({
+      data: { name: body.title, boardId: body.boardId, order: body.order }
+    });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: list.id, title: list.name, order: list.order, boardId: list.boardId };
+  }
+
+  @Post('tasks')
+  async createTask(@Body() body: { title: string; columnId: string; order: number }) {
+    // Frontend manda 'tasks', nós salvamos no Prisma como 'Card'
+    const card = await this.prisma.card.create({
+      data: { title: body.title, listId: body.columnId, order: body.order }
+    });
+    const list = await this.prisma.list.findUnique({ where: { id: card.listId } });
+    if (list) this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: card.id, title: card.title, order: card.order, columnId: card.listId };
+  }
+
+  @Patch('tasks/:id')
+  async updateTask(@Param('id') id: string, @Body() body: { columnId?: string; order?: number }) {
+    const data: any = {};
+    if (body.columnId) data.listId = body.columnId;
+    if (body.order !== undefined) data.order = body.order;
+
+    const card = await this.prisma.card.update({ where: { id }, data });
+    const list = await this.prisma.list.findUnique({ where: { id: card.listId } });
+    if (list) this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: card.id, title: card.title, order: card.order, columnId: card.listId };
+  }
+}
+EOF
+
+echo "🏗️ Recompilando o Backend API..."
+cd apps/api
+pnpm run build
+cd ../..
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 PROBLEMA CORRIGIDO COM SUCESSO!"
+echo "API compilada perfeitamente usando as tabelas corretas."
+echo "✅=========================================================="
