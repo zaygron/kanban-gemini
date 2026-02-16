@@ -1,5 +1,28 @@
 {
   "name": "api",
   "version": "1.0.0",
-  "private": true
+  "private": true,
+  "scripts": {
+    "db:up": "docker compose -f ../../docker-compose.yml up -d",
+    "db:down": "docker compose -f ../../docker-compose.yml down",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio",
+    "seed": "tsx prisma/seed.ts"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.10.2",
+    "@kanban/shared": "workspace:*",
+    "bcryptjs": "^2.4.3"
+  },
+  "devDependencies": {
+    "prisma": "^5.10.2",
+    "tsx": "^4.7.1",
+    "typescript": "^5.3.3",
+    "@types/node": "^20.0.0",
+    "@types/bcryptjs": "^2.4.6"
+  }
 }

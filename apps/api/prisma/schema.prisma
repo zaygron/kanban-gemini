@@ -1,0 +1,135 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  name         String
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  boardsCreated Board[]
+  memberships   Membership[]
+  cardsCreated  Card[]       @relation("CardCreator")
+  cardsAssigned Card[]       @relation("CardAssignee")
+  comments      Comment[]
+  activities    ActivityLog[]
+
+  @@map("users")
+}
+
+model Board {
+  id          String    @id @default(uuid()) @db.Uuid
+  name        String
+  createdById String    @map("created_by") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+  archivedAt  DateTime? @map("archived_at") @db.Timestamptz
+  version     Int       @default(1)
+
+  createdBy   User          @relation(fields: [createdById], references: [id])
+  memberships Membership[]
+  lists       List[]
+  cards       Card[]
+  activities  ActivityLog[]
+
+  @@index([createdById])
+  @@map("boards")
+}
+
+model Membership {
+  id         String    @id @default(uuid()) @db.Uuid
+  boardId    String    @map("board_id") @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  role       String
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz
+
+  board Board @relation(fields: [boardId], references: [id])
+  user  User  @relation(fields: [userId], references: [id])
+
+  @@unique([boardId, userId])
+  @@map("memberships")
+}
+
+model List {
+  id         String    @id @default(uuid()) @db.Uuid
+  boardId    String    @map("board_id") @db.Uuid
+  title      String
+  rank       String
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+  archivedAt DateTime? @map("archived_at") @db.Timestamptz
+  version    Int       @default(1)
+
+  board Board  @relation(fields: [boardId], references: [id])
+  cards Card[]
+
+  @@index([boardId, rank])
+  @@map("lists")
+}
+
+model Card {
+  id          String    @id @default(uuid()) @db.Uuid
+  boardId     String    @map("board_id") @db.Uuid
+  listId      String    @map("list_id") @db.Uuid
+  title       String
+  description String?
+  status      String
+  assignedTo  String?   @map("assigned_to") @db.Uuid
+  rank        String
+  createdById String    @map("created_by") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+  archivedAt  DateTime? @map("archived_at") @db.Timestamptz
+  version     Int       @default(1)
+
+  board    Board   @relation(fields: [boardId], references: [id])
+  list     List    @relation(fields: [listId], references: [id])
+  assignee User?   @relation("CardAssignee", fields: [assignedTo], references: [id])
+  creator  User    @relation("CardCreator", fields: [createdById], references: [id])
+  comments Comment[]
+
+  @@index([listId, rank])
+  @@index([boardId])
+  @@map("cards")
+}
+
+model Comment {
+  id         String    @id @default(uuid()) @db.Uuid
+  cardId     String    @map("card_id") @db.Uuid
+  authorId   String    @map("author_id") @db.Uuid
+  body       String
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  archivedAt DateTime? @map("archived_at") @db.Timestamptz
+
+  card   Card @relation(fields: [cardId], references: [id])
+  author User @relation(fields: [authorId], references: [id])
+
+  @@index([cardId, createdAt])
+  @@map("comments")
+}
+
+model ActivityLog {
+  id          BigInt   @id @default(autoincrement())
+  boardId     String   @map("board_id") @db.Uuid
+  actorUserId String   @map("actor_user_id") @db.Uuid
+  eventType   String   @map("event_type")
+  entityType  String   @map("entity_type")
+  entityId    String?  @map("entity_id") @db.Uuid
+  payload     Json     @db.JsonB
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  board Board @relation(fields: [boardId], references: [id])
+  actor User  @relation(fields: [actorUserId], references: [id])
+
+  @@index([boardId, createdAt])
+  @@map("activity_logs")
+}
