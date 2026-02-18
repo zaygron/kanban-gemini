@@ -1,56 +1,47 @@
-import { Controller, Post, Body, Res, Get, UseGuards, UsePipes, UnauthorizedException } from '@nestjs/common';
-import { Response } from 'express';
+import { Controller, Post, Body, UnauthorizedException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
-import { LoginRequestSchema } from '@kanban/shared';
-import { ZodValidationPipe } from '../common/zod-validation.pipe';
-import { JwtAuthGuard } from './jwt-auth.guard';
-import { CurrentUser } from '../common/current-user.decorator';
 
 @Controller('auth')
 export class AuthController {
   constructor(private prisma: PrismaService, private jwtService: JwtService) {}
 
-  @Post('login')
-  @UsePipes(new ZodValidationPipe(LoginRequestSchema))
-  async login(@Body() body: any, @Res({ passthrough: true }) res: Response) {
-    const user = await this.prisma.user.findUnique({ where: { email: body.email } });
-    if (!user || !(await bcrypt.compare(body.password, user.passwordHash))) {
-      throw new UnauthorizedException('Credenciais inválidas');
+  @Post('register')
+  async register(@Body() body: any) {
+    if (!body.email || !body.password || !body.name) {
+      throw new BadRequestException('Nome, e-mail e senha são obrigatórios.');
     }
-    
-    const payload = { sub: user.id, email: user.email };
-    const accessToken = await this.jwtService.signAsync(payload, { secret: 'kanban_secret_v2', expiresIn: '7d' });
-    
-    res.cookie('accessToken', accessToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      path: '/',
+
+    const existingUser = await this.prisma.user.findUnique({ where: { email: body.email } });
+    if (existingUser) {
+      throw new BadRequestException('Este e-mail já está em uso por outra conta.');
+    }
+
+    const hash = await bcrypt.hash(body.password, 10);
+    const user = await this.prisma.user.create({
+      data: { name: body.name, email: body.email, passwordHash: hash }
     });
+
+    // Já gera o token de acesso instantâneo para não forçar o usuário a logar de novo
+    const token = await this.jwtService.signAsync({ sub: user.id, email: user.email });
+    return { success: true, token, user: { id: user.id, name: user.name, email: user.email } };
+  }
+
+  @Post('login')
+  async login(@Body() body: any) {
+    const user = await this.prisma.user.findUnique({ where: { email: body.email } });
+    if (!user) throw new UnauthorizedException('Credenciais inválidas.');
     
-    const { passwordHash, ...safeUser } = user;
-    return { user: safeUser, accessToken };
+    const isMatch = await bcrypt.compare(body.password, user.passwordHash);
+    if (!isMatch) throw new UnauthorizedException('Credenciais inválidas.');
+
+    const token = await this.jwtService.signAsync({ sub: user.id, email: user.email });
+    return { success: true, token, user: { id: user.id, name: user.name, email: user.email } };
   }
 
   @Post('logout')
-  async logout(@Res({ passthrough: true }) res: Response) {
-    res.clearCookie('accessToken');
+  async logout() {
     return { success: true };
-  }
-}
-
-@Controller('me')
-export class MeController {
-  constructor(private prisma: PrismaService) {}
-
-  @UseGuards(JwtAuthGuard)
-  @Get()
-  async getProfile(@CurrentUser() user: any) {
-    const dbUser = await this.prisma.user.findUnique({ where: { id: user.sub } });
-    if (!dbUser) throw new UnauthorizedException();
-    const { passwordHash, ...safeUser } = dbUser;
-    return { user: safeUser };
   }
 }

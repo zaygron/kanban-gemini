@@ -1,0 +1,410 @@
+#!/bin/bash
+set -e
+
+echo "⚙️ 1. Backend: Ensinando a API a salvar e devolver o Responsável (assignedTo)..."
+
+cat << 'EOF' > apps/api/src/kanban/kanban.controller.ts
+import { Controller, Get, Post, Body, Patch, Param, Delete, Request, UseGuards, NotFoundException, UnauthorizedException, BadRequestException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { EventsGateway } from '../events/events.gateway';
+import { KanbanGuard } from '../auth/kanban.guard';
+
+function toRank(order: number): string { return Number(order || 0).toFixed(5).padStart(20, '0'); }
+
+@UseGuards(KanbanGuard)
+@Controller('kanban')
+export class KanbanController {
+  constructor(private prisma: PrismaService, private events: EventsGateway) {}
+
+  @Get('board/:id')
+  async getBoard(@Param('id') id: string, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    
+    const board = await this.prisma.board.findFirst({
+      where: { id, OR: [ { createdById: userId }, { members: { some: { userId: userId } } } ] },
+      include: { lists: { include: { cards: { orderBy: { rank: 'asc' } } }, orderBy: { rank: 'asc' } } }
+    });
+    
+    if (!board) throw new UnauthorizedException('Acesso negado.');
+
+    return {
+      ...board,
+      columns: board.lists.map((list: any) => ({
+        id: list.id, title: list.title, order: parseFloat(list.rank), boardId: list.boardId,
+        tasks: list.cards.map((card: any) => ({ 
+          id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId,
+          description: card.description, priority: card.priority, startDate: card.startDate, dueDate: card.dueDate,
+          assignedTo: card.assignedTo // 🔥 O CAMPO MÁGICO AQUI
+        }))
+      }))
+    };
+  }
+
+  @Get('board/:id/members')
+  async getMembers(@Param('id') id: string, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const board = await this.prisma.board.findUnique({
+      where: { id },
+      include: { members: { include: { user: true } } }
+    });
+    if (!board) throw new NotFoundException('Quadro não encontrado.');
+
+    const isCreator = board.createdById === userId;
+    const isMember = board.members.some((m: any) => m.userId === userId);
+    if (!isCreator && !isMember) throw new UnauthorizedException('Acesso negado.');
+
+    const owner = await this.prisma.user.findUnique({ where: { id: board.createdById } });
+    
+    return {
+      owner: { id: owner?.id, name: owner?.name, email: owner?.email },
+      members: board.members.map((m: any) => ({
+        id: m.user.id, name: m.user.name, email: m.user.email, role: m.role, memberId: m.id
+      }))
+    };
+  }
+
+  @Post('board/:id/members')
+  async addMember(@Param('id') id: string, @Body() body: { email: string }, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const board = await this.prisma.board.findUnique({ where: { id } });
+    if (!board || board.createdById !== userId) throw new UnauthorizedException('Apenas o dono pode convidar.');
+
+    const invitee = await this.prisma.user.findUnique({ where: { email: body.email } });
+    if (!invitee) throw new BadRequestException('Usuário não encontrado.');
+    if (invitee.id === userId) throw new BadRequestException('Você é o dono.');
+
+    const existing = await this.prisma.boardMember.findUnique({ where: { boardId_userId: { boardId: id, userId: invitee.id } } });
+    if (existing) throw new BadRequestException('Usuário já é membro.');
+
+    await this.prisma.boardMember.create({ data: { boardId: id, userId: invitee.id } });
+    this.events.server.emit('boardUpdated', { boardId: id });
+    return { success: true, message: 'Convidado com sucesso!' };
+  }
+
+  @Delete('board/:id/members/:memberId')
+  async removeMember(@Param('id') id: string, @Param('memberId') memberId: string, @Request() req: any) {
+     const userId = req.user?.sub || req.user?.id;
+     const board = await this.prisma.board.findUnique({ where: { id } });
+     if (!board || board.createdById !== userId) throw new UnauthorizedException('Acesso negado.');
+     await this.prisma.boardMember.delete({ where: { id: memberId } });
+     this.events.server.emit('boardUpdated', { boardId: id });
+     return { success: true };
+  }
+
+  @Patch('board/:id')
+  async updateBoard(@Param('id') id: string, @Body() body: { name: string }, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const board = await this.prisma.board.findUnique({ where: { id } });
+    if (!board || board.createdById !== userId) throw new UnauthorizedException('Acesso negado.');
+    const updatedBoard = await this.prisma.board.update({ where: { id }, data: { name: body.name } });
+    this.events.server.emit('boardUpdated', { boardId: id });
+    return updatedBoard;
+  }
+
+  @Post('columns')
+  async createColumn(@Body() body: { title: string; boardId: string; order: number }) {
+    const list = await this.prisma.list.create({ data: { title: body.title, boardId: body.boardId, rank: toRank(body.order) } });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: list.id, title: list.title, order: parseFloat(list.rank), boardId: list.boardId };
+  }
+
+  @Patch('columns/:id')
+  async updateColumn(@Param('id') id: string, @Body() body: { title: string }) {
+    const list = await this.prisma.list.update({ where: { id }, data: { title: body.title } });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: list.id, title: list.title, order: parseFloat(list.rank), boardId: list.boardId };
+  }
+
+  @Post('tasks')
+  async createTask(@Request() req: any, @Body() body: { title: string; columnId: string; order: number }) {
+    const list = await this.prisma.list.findUnique({ where: { id: body.columnId } });
+    if (!list) return null;
+    const userId = req.user.sub || req.user.id; 
+    const card = await this.prisma.card.create({
+      data: { title: body.title, listId: body.columnId, rank: toRank(body.order), boardId: list.boardId, createdById: userId, status: 'TODO' }
+    });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId, description: card.description, priority: card.priority, startDate: card.startDate, dueDate: card.dueDate, assignedTo: card.assignedTo };
+  }
+
+  @Patch('tasks/:id')
+  async updateTask(@Param('id') id: string, @Body() body: any) {
+    const data: any = {};
+    if (body.columnId !== undefined) data.listId = body.columnId;
+    if (body.order !== undefined) data.rank = toRank(body.order);
+    if (body.title !== undefined) data.title = body.title;
+    if (body.description !== undefined) data.description = body.description;
+    if (body.priority !== undefined) data.priority = body.priority;
+    if (body.startDate !== undefined) data.startDate = body.startDate ? new Date(body.startDate) : null;
+    if (body.dueDate !== undefined) data.dueDate = body.dueDate ? new Date(body.dueDate) : null;
+    if (body.assignedTo !== undefined) data.assignedTo = body.assignedTo || null; // 🔥 SALVANDO O RESPONSÁVEL
+
+    const card = await this.prisma.card.update({ where: { id }, data });
+    this.events.server.emit('boardUpdated', { boardId: card.boardId });
+    return { id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId, description: card.description, priority: card.priority, startDate: card.startDate, dueDate: card.dueDate, assignedTo: card.assignedTo };
+  }
+
+  @Delete('tasks/:id')
+  async deleteTask(@Param('id') id: string) {
+    const card = await this.prisma.card.findUnique({ where: { id }});
+    if (!card) return null;
+    await this.prisma.card.delete({ where: { id } });
+    this.events.server.emit('boardUpdated', { boardId: card.boardId });
+    return { success: true };
+  }
+}
+EOF
+
+echo "🎨 2. Frontend: Adicionando o Dropdown Inteligente no Modal da Tarefa..."
+
+cat << 'EOF' > apps/web/src/components/board/TaskModal.tsx
+import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { useParams } from 'next/navigation';
+import { X, Calendar, AlignLeft, Flag, User } from 'lucide-react';
+import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
+
+export function TaskModal({ task, onClose }: { task: any, onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const params = useParams();
+  const boardId = params?.id as string;
+
+  // Puxa a lista de membros direto do Cache (Não faz requisição extra!)
+  const { data: membersData } = useQuery({
+    queryKey: ['boardMembers', boardId],
+    enabled: !!boardId
+  });
+
+  const [description, setDescription] = useState(task.description || '');
+  const [priority, setPriority] = useState(task.priority || 'MEDIUM');
+  const [assignedTo, setAssignedTo] = useState(task.assignedTo || '');
+  
+  const formatDateForInput = (dateStr: string) => {
+    if (!dateStr) return '';
+    try { return new Date(dateStr).toISOString().split('T')[0]; } catch { return ''; }
+  };
+
+  const [startDate, setStartDate] = useState(formatDateForInput(task.startDate));
+  const [dueDate, setDueDate] = useState(formatDateForInput(task.dueDate));
+  
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+
+  const updateMutation = useMutation({
+    mutationFn: async () => {
+      await api.patch(`/kanban/tasks/${task.id}`, {
+        description, priority,
+        assignedTo: assignedTo || null, // Se vazio, envia nulo (Ninguém)
+        startDate: startDate || null, dueDate: dueDate || null
+      });
+    },
+    onSuccess: () => {
+      toast.success('Detalhes salvos com sucesso!');
+      queryClient.invalidateQueries({ queryKey: ['board'] });
+      onClose();
+    },
+    onError: () => toast.error('Erro ao salvar detalhes.')
+  });
+
+  if (!mounted) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
+      <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity" onClick={onClose}></div>
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200">
+        
+        <div className="flex items-center justify-between p-5 border-b border-slate-100 bg-slate-50/50 rounded-t-2xl">
+          <h2 className="text-xl font-bold text-slate-800 break-words pr-4 leading-snug">{task.title}</h2>
+          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-full transition-colors shrink-0"><X size={20} /></button>
+        </div>
+        
+        <div className="p-6 overflow-y-auto flex-1 space-y-8 scrollbar-thin">
+          {/* Organização em Grid mais espaçoso (2 colunas) */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            
+            {/* NOVO: Seletor Inteligente de Responsável */}
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm font-semibold text-slate-700"><User size={16} className="text-indigo-500"/> Responsável</label>
+              <select value={assignedTo} onChange={(e) => setAssignedTo(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-slate-50 cursor-pointer transition-all hover:border-blue-300 font-medium text-slate-700">
+                <option value="">👤 Ninguém atribuído</option>
+                {membersData?.owner && (
+                  <option value={membersData.owner.id}>👑 {membersData.owner.name} (Admin)</option>
+                )}
+                {membersData?.members?.map((m: any) => (
+                  <option key={m.id} value={m.id}>✔️ {m.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm font-semibold text-slate-700"><Flag size={16} className="text-blue-500"/> Prioridade</label>
+              <select value={priority} onChange={(e) => setPriority(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-slate-50 cursor-pointer transition-all hover:border-blue-300 font-medium text-slate-700">
+                <option value="LOW">Baixa</option>
+                <option value="MEDIUM">Média</option>
+                <option value="HIGH">Alta 🔥</option>
+              </select>
+            </div>
+
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm font-semibold text-slate-700"><Calendar size={16} className="text-emerald-500"/> Data Início</label>
+              <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-slate-50 transition-all hover:border-blue-300 text-slate-700 font-medium" />
+            </div>
+
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm font-semibold text-slate-700"><Calendar size={16} className="text-red-500"/> Prazo Final</label>
+              <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-slate-50 transition-all hover:border-blue-300 text-slate-700 font-medium" />
+            </div>
+            
+          </div>
+          
+          <div className="space-y-3 pt-2 border-t border-slate-100">
+            <label className="flex items-center gap-2 text-sm font-semibold text-slate-700"><AlignLeft size={16} className="text-purple-500"/> Descrição Detalhada</label>
+            <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Adicione instruções, links, ou detalhes importantes para a execução desta tarefa..." className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none min-h-[150px] resize-y leading-relaxed bg-slate-50 focus:bg-white transition-colors hover:border-blue-300 text-slate-700" />
+          </div>
+        </div>
+        
+        <div className="p-5 border-t border-slate-100 bg-slate-50 flex justify-end gap-3 rounded-b-2xl">
+          <button onClick={onClose} className="px-5 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-200 rounded-xl transition-colors">Cancelar</button>
+          <button onClick={() => updateMutation.mutate()} disabled={updateMutation.isPending} className="px-6 py-2.5 text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition-all shadow-md shadow-blue-600/20 disabled:opacity-50">
+            {updateMutation.isPending ? 'Salvando...' : 'Salvar Alterações'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+EOF
+
+echo "🎨 3. Frontend: Adicionando o Avatar no Cartão Principal (Fase 3)..."
+cat << 'EOF' > apps/web/src/components/board/TaskCard.tsx
+import { useState, useEffect } from 'react';
+import { useParams } from 'next/navigation';
+import { useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { GripVertical, Trash2, Maximize2, AlignLeft, Calendar, Flag } from 'lucide-react';
+import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
+import { TaskModal } from './TaskModal';
+
+export function TaskCard({ task, isOverlay }: { task: any, isOverlay?: boolean }) {
+  const queryClient = useQueryClient();
+  const params = useParams();
+  const boardId = params?.id as string;
+  
+  const [isEditing, setIsEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState(task.title);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
+  useEffect(() => { setEditTitle(task.title); }, [task.title]);
+
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: task.id, data: { type: 'Task', task } });
+
+  // A Mágica do Cache: Nós roubamos os dados da equipe que já foram baixados no Cabeçalho!
+  // Isso não gera re-renderização nem custo extra de rede.
+  const { data: membersData } = useQuery({ queryKey: ['boardMembers', boardId], enabled: !!boardId });
+  
+  let assignee = null;
+  if (task.assignedTo && membersData) {
+    if (membersData.owner?.id === task.assignedTo) assignee = membersData.owner;
+    else assignee = membersData.members?.find((m: any) => m.id === task.assignedTo);
+  }
+
+  const updateTaskMutation = useMutation({
+    mutationFn: async (newTitle: string) => await api.patch(`/kanban/tasks/${task.id}`, { title: newTitle }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board'] }),
+  });
+
+  const deleteTaskMutation = useMutation({
+    mutationFn: async () => await api.delete(`/kanban/tasks/${task.id}`),
+    onSuccess: () => { toast.success('Tarefa excluída!'); queryClient.invalidateQueries({ queryKey: ['board'] }); },
+  });
+
+  const handleSave = () => {
+    setIsEditing(false);
+    if (editTitle.trim() && editTitle.trim() !== task.title) updateTaskMutation.mutate(editTitle.trim());
+    else setEditTitle(task.title);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave(); }
+    if (e.key === 'Escape') { setIsEditing(false); setEditTitle(task.title); }
+  };
+
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging && !isOverlay ? 0.3 : 1 };
+
+  const isOverdue = task.dueDate && new Date(task.dueDate) < new Date(new Date().setHours(0,0,0,0));
+  const priorityColors: Record<string, string> = { HIGH: 'bg-red-50 text-red-600 border-red-200', MEDIUM: 'bg-amber-50 text-amber-600 border-amber-200', LOW: 'bg-blue-50 text-blue-600 border-blue-200' };
+  const priorityLabels: Record<string, string> = { HIGH: 'Alta', MEDIUM: 'Média', LOW: 'Baixa' };
+
+  return (
+    <>
+      <div ref={setNodeRef} style={style} className={`group bg-white p-3.5 rounded-xl shadow-sm border flex flex-col gap-2 relative transition-all ${isOverlay ? 'border-blue-500 shadow-xl rotate-2 scale-105 z-40' : 'border-slate-200 hover:border-blue-400 hover:shadow-md mb-3'}`}>
+        
+        <div className="flex items-start gap-2">
+          <div {...attributes} {...listeners} className="mt-0.5 text-slate-300 hover:text-blue-500 cursor-grab active:cursor-grabbing outline-none touch-none shrink-0"><GripVertical size={16} /></div>
+          
+          <div className="flex-1 pr-12">
+            {isEditing && !isOverlay ? (
+              <textarea autoFocus value={editTitle} onChange={(e) => setEditTitle(e.target.value)} onBlur={handleSave} onKeyDown={handleKeyDown} onPointerDown={(e) => e.stopPropagation()} className="w-full text-sm font-medium text-slate-800 bg-blue-50 border border-blue-400 rounded px-1 -mx-1 outline-none resize-none overflow-hidden leading-snug" rows={1} onInput={(e) => { const target = e.target as HTMLTextAreaElement; target.style.height = 'auto'; target.style.height = `${target.scrollHeight}px`; }} />
+            ) : (
+              <p onClick={() => !isOverlay && setIsEditing(true)} className="text-sm font-medium text-slate-800 leading-snug break-words cursor-text hover:bg-slate-50 rounded px-1 -mx-1 transition-colors whitespace-pre-wrap min-h-[20px]" title="Clique para editar rapidamente">{task.title}</p>
+            )}
+          </div>
+          
+          {!isOverlay && !isEditing && (
+            <div className="absolute right-2 top-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 pl-2">
+              <button onClick={(e) => { e.stopPropagation(); setIsModalOpen(true); }} className="text-slate-400 hover:text-blue-600 hover:bg-blue-50 p-1.5 rounded-md transition-colors border border-transparent hover:border-blue-100" title="Abrir Detalhes"><Maximize2 size={14} /></button>
+              <button onClick={(e) => { e.stopPropagation(); if (confirm('Excluir esta tarefa?')) deleteTaskMutation.mutate(); }} className="text-slate-400 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-md transition-colors border border-transparent hover:border-red-100" title="Excluir"><Trash2 size={14} /></button>
+            </div>
+          )}
+        </div>
+
+        {/* Linha 2: Badges Visuais, Etiquetas E O AVATAR DO RESPONSÁVEL */}
+        {(task.description || task.dueDate || (task.priority && task.priority !== 'MEDIUM') || assignee) && (
+          <div className="flex items-end justify-between mt-1 pl-6 min-h-[24px]">
+            <div className="flex flex-wrap items-center gap-2">
+              {task.priority && task.priority !== 'MEDIUM' && (
+                <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md border ${priorityColors[task.priority]}`} title={`Prioridade: ${priorityLabels[task.priority]}`}>
+                  <Flag size={10} /> {priorityLabels[task.priority]}
+                </div>
+              )}
+              {task.description && (
+                <div className="text-slate-400 bg-slate-50 p-1 rounded-md border border-slate-100" title="Possui descrição oculta">
+                  <AlignLeft size={12} />
+                </div>
+              )}
+              {task.dueDate && (
+                <div className={`flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-md border ${isOverdue ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-500 border-slate-200'}`} title={isOverdue ? 'Atrasado!' : 'Dentro do Prazo'}>
+                  <Calendar size={12} /> {new Date(task.dueDate).toLocaleDateString('pt-BR', { timeZone: 'UTC', day: '2-digit', month: 'short' })}
+                </div>
+              )}
+            </div>
+            
+            {/* O Avatar Redondo com Iniciais idêntico ao Trello */}
+            {assignee && (
+              <div className="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-[10px] uppercase ring-2 ring-white shadow-sm shrink-0 ml-auto" title={`Responsável: ${assignee.name}`}>
+                {assignee.name.substring(0, 2)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {isModalOpen && !isOverlay && <TaskModal task={task} onClose={() => setIsModalOpen(false)} />}
+    </>
+  );
+}
+EOF
+
+echo "🚀 4. Recompilando Todo o Ecossistema..."
+cd apps/api && pnpm run build
+cd ../web && pnpm run build
+cd ../..
+
+echo "✅=========================================================="
+echo "🎯 XEQUE-MATE! ATRIBUIÇÃO DE TAREFAS ESTÁ 100% OPERACIONAL."
+echo "✅=========================================================="

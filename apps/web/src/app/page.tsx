@@ -1,72 +1,126 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { LayoutDashboard, LogOut, Plus, ShieldAlert, Crown } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
-import { useRouter } from 'next/navigation';
-import { LayoutDashboard, Users, LogOut, Plus } from 'lucide-react';
-import Link from 'next/link';
-import { useEffect } from 'react';
 
-export default function DashboardPage() {
+export default function Home() {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const [newBoardName, setNewBoardName] = useState('');
+  const [mounted, setMounted] = useState(false);
 
-  const { data: user, isError: userError, isLoading: userLoading } = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get('/me')).data.user, retry: false });
-  const { data: boards, isLoading: boardsLoading } = useQuery({ queryKey: ['boards'], queryFn: async () => (await api.get('/boards')).data, enabled: !!user });
+  useEffect(() => { setMounted(true); }, []);
 
-  const createBoardMutation = useMutation({
-    mutationFn: async (name: string) => await api.post('/boards', { name }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['boards'] })
+  const { data: userData, isLoading: userLoading, isError: userError } = useQuery({
+    queryKey: ['me'],
+    queryFn: async () => (await api.get('/me')).data.user,
+    retry: false
   });
 
-  useEffect(() => { if (userError) router.replace('/login'); }, [userError, router]);
+  const { data: boards, isLoading: boardsLoading } = useQuery({
+    queryKey: ['boards'],
+    queryFn: async () => (await api.get('/boards')).data,
+    enabled: !!userData
+  });
 
-  const handleCreateBoard = () => {
-    const name = window.prompt('Qual o nome do novo projeto/quadro?');
-    if (name?.trim()) createBoardMutation.mutate(name.trim());
+  const createBoardMutation = useMutation({
+    mutationFn: async (name: string) => {
+      const { data } = await api.post('/boards', { name });
+      return data;
+    },
+    onSuccess: (newBoard) => {
+      setNewBoardName('');
+      queryClient.invalidateQueries({ queryKey: ['boards'] });
+      router.push(`/board/${newBoard.id}`);
+    }
+  });
+
+  useEffect(() => {
+    if (userError) {
+      localStorage.removeItem('kanban_token');
+      router.replace('/login');
+    }
+  }, [userError, router]);
+
+  const handleLogout = () => {
+    // 🔥 O Logout Implacável: Esvazia o cofre do navegador
+    localStorage.removeItem('kanban_token');
+    queryClient.clear();
+    router.replace('/login');
   };
 
-  if (userLoading || boardsLoading) return <div className="min-h-screen flex items-center justify-center text-slate-500 font-medium">Carregando ambiente...</div>;
-  if (!user) return null;
+  const handleCreate = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newBoardName.trim()) createBoardMutation.mutate(newBoardName.trim());
+  };
+
+  if (!mounted || userLoading) return null;
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
-      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm">
+    <div className="min-h-screen bg-slate-50 font-sans">
+      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between sticky top-0 z-10 shadow-sm">
         <div className="flex items-center gap-2 text-blue-600">
           <LayoutDashboard size={24} />
-          <h1 className="text-xl font-bold text-slate-900">Kanban v2</h1>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 text-sm text-slate-600 bg-slate-100 px-3 py-1.5 rounded-full font-medium">
-            <Users size={16} /> {user.name}
-          </div>
-          <button onClick={async () => { await api.post('/auth/logout'); queryClient.clear(); router.replace('/login'); }} className="text-slate-500 hover:text-red-600 transition-colors p-2"><LogOut size={20} /></button>
-        </div>
-      </header>
-
-      <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-10">
-        <div className="flex items-center justify-between mb-8">
-          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Meus Projetos</h2>
-          <button onClick={handleCreateBoard} disabled={createBoardMutation.isPending} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-xl font-medium transition-all shadow-sm">
-            <Plus size={20} /> Novo Quadro
-          </button>
+          <h1 className="text-xl font-bold text-slate-900 tracking-tight">Meus Projetos</h1>
         </div>
         
-        {boards?.length === 0 ? (
-          <div className="bg-white border border-dashed border-slate-300 rounded-2xl p-16 flex flex-col items-center text-center">
-            <LayoutDashboard size={48} className="text-slate-300 mb-4" />
-            <h3 className="text-lg font-semibold text-slate-700">Nenhum quadro encontrado</h3>
-            <p className="text-slate-500 mt-1 max-w-sm">Você ainda não tem nenhum projeto em andamento. Clique no botão acima para criar o seu primeiro quadro e comece a organizar suas tarefas!</p>
+        {/* Identificação de Sessão Clara e Logout */}
+        {userData && (
+          <div className="flex items-center gap-4 bg-slate-50 border border-slate-100 px-4 py-1.5 rounded-full shadow-sm">
+            <div className="flex items-center gap-2 border-r border-slate-200 pr-4">
+              <div className="w-7 h-7 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-xs uppercase shadow-sm">
+                {userData.name?.substring(0, 2)}
+              </div>
+              <div className="hidden sm:flex sm:flex-col sm:justify-center">
+                <span className="text-sm font-bold text-slate-700 leading-none">{userData.name}</span>
+                <span className="text-[10px] font-medium text-slate-400 mt-0.5">{userData.email}</span>
+              </div>
+            </div>
+            <button onClick={handleLogout} className="text-slate-400 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-lg transition-colors flex items-center gap-1.5 text-sm font-semibold" title="Sair do Sistema">
+              <LogOut size={16} /> <span className="hidden sm:block">Sair</span>
+            </button>
           </div>
+        )}
+      </header>
+
+      <main className="max-w-6xl mx-auto p-6 mt-6">
+        <form onSubmit={handleCreate} className="mb-10 flex gap-3">
+          <input type="text" value={newBoardName} onChange={(e) => setNewBoardName(e.target.value)} placeholder="Nome do novo projeto..." className="flex-1 max-w-sm px-4 py-3 rounded-xl border border-slate-300 shadow-sm outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm font-medium text-slate-700" />
+          <button type="submit" disabled={createBoardMutation.isPending || !newBoardName.trim()} className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-5 py-3 rounded-xl transition-all shadow-md shadow-blue-600/20 disabled:opacity-50 flex items-center gap-2">
+            <Plus size={18} /> Criar Quadro
+          </button>
+        </form>
+
+        {boardsLoading ? (
+          <div className="flex items-center gap-3 text-slate-500 font-medium"><div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div> Carregando seus projetos...</div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
             {boards?.map((board: any) => (
-              <Link key={board.id} href={`/board/${board.id}`} className="group flex flex-col bg-white border border-slate-200 rounded-2xl p-6 shadow-sm hover:shadow-md hover:border-blue-400 transition-all cursor-pointer">
-                <div className="w-10 h-10 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center mb-4 group-hover:bg-blue-600 group-hover:text-white transition-colors"><LayoutDashboard size={20} /></div>
-                <h3 className="text-lg font-semibold text-slate-900 mb-1">{board.name}</h3>
-                <p className="text-sm text-slate-500 mt-auto pt-4 flex items-center gap-1 group-hover:text-blue-600 transition-colors font-medium">Acessar quadro &rarr;</p>
+              <Link key={board.id} href={`/board/${board.id}`} className="group relative bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md hover:border-blue-400 transition-all flex flex-col h-40">
+                <h2 className="text-lg font-bold text-slate-800 mb-2 group-hover:text-blue-600 transition-colors line-clamp-2 leading-snug">{board.name}</h2>
+                <div className="mt-auto flex items-center justify-between text-xs text-slate-400 font-medium">
+                  {/* Etiquetas Inteligentes (Dono vs Membro) */}
+                  {board.createdById === userData.id ? (
+                    <span className="text-blue-600 bg-blue-50 px-2 py-1 rounded-md border border-blue-100 flex items-center gap-1 font-bold"><Crown size={12}/> Seu Projeto</span>
+                  ) : (
+                    <span className="text-emerald-700 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-200 flex items-center gap-1 font-bold"><ShieldAlert size={12}/> Compartilhado</span>
+                  )}
+                  <span className="group-hover:translate-x-1 transition-transform">Entrar &rarr;</span>
+                </div>
               </Link>
             ))}
+            
+            {boards?.length === 0 && (
+              <div className="col-span-full py-16 text-center border-2 border-dashed border-slate-200 rounded-3xl bg-slate-50/50">
+                <LayoutDashboard size={48} className="mx-auto text-slate-300 mb-4" />
+                <h3 className="text-lg font-bold text-slate-700 mb-1">Nenhum projeto encontrado</h3>
+                <p className="text-slate-500 text-sm">Crie seu primeiro quadro ou aguarde um convite da equipe.</p>
+              </div>
+            )}
           </div>
         )}
       </main>

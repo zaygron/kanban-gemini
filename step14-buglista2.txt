@@ -1,0 +1,128 @@
+#!/bin/bash
+set -e
+
+echo "✏️ 1. Frontend: Adicionando Edição Inline (Click-to-Edit) no Título das Listas..."
+
+cat << 'EOF' > apps/web/src/components/board/Column.tsx
+import { useState, useEffect } from 'react';
+import { useSortable } from '@dnd-kit/sortable';
+import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { TaskCard } from './TaskCard';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import { Plus } from 'lucide-react';
+import toast from 'react-hot-toast';
+
+export function Column({ column, tasks, isRestricted, userId }: { column: any, tasks: any[], isRestricted: boolean, userId: string }) {
+  const queryClient = useQueryClient();
+  const { setNodeRef, isDragging } = useSortable({ id: column.id, data: { type: 'Column', column } });
+  
+  const [isAddingTask, setIsAddingTask] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  
+  // 🔥 OS NOVOS ESTADOS PARA A EDIÇÃO INLINE DO TÍTULO DA LISTA
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [editTitle, setEditTitle] = useState(column.title);
+
+  useEffect(() => { setEditTitle(column.title); }, [column.title]);
+
+  const createTaskMutation = useMutation({
+    mutationFn: async (title: string) => await api.post('/kanban/tasks', { title, columnId: column.id, order: tasks.length }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['board'] }); setNewTaskTitle(''); setIsAddingTask(false); }
+  });
+
+  const updateColumnMutation = useMutation({
+    mutationFn: async (newTitle: string) => await api.patch(`/kanban/columns/${column.id}`, { title: newTitle }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board'] }),
+    onError: (err: any) => {
+      toast.error(err.response?.data?.message || 'Erro ao renomear lista.');
+      setEditTitle(column.title); // Reverte visualmente em caso de erro
+    }
+  });
+
+  const handleSaveTask = () => {
+    if (newTaskTitle.trim()) createTaskMutation.mutate(newTaskTitle.trim());
+    else setIsAddingTask(false);
+  };
+
+  // 🔥 A LÓGICA DE SALVAMENTO DO TÍTULO DA LISTA
+  const handleSaveTitle = () => {
+    setIsEditingTitle(false);
+    if (editTitle.trim() && editTitle.trim() !== column.title) {
+      updateColumnMutation.mutate(editTitle.trim());
+    } else {
+      setEditTitle(column.title);
+    }
+  };
+
+  const handleKeyDownTitle = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') { e.preventDefault(); handleSaveTitle(); }
+    if (e.key === 'Escape') { setIsEditingTitle(false); setEditTitle(column.title); }
+  };
+
+  const style = { opacity: isDragging ? 0.4 : 1 };
+
+  return (
+    <div ref={setNodeRef} style={style} className="bg-slate-100/80 backdrop-blur-sm w-80 shrink-0 rounded-2xl flex flex-col h-full border border-slate-200/60 shadow-sm overflow-hidden">
+      
+      {/* CABEÇALHO DA LISTA (AGORA EDITÁVEL!) */}
+      <div className="p-4 border-b border-slate-200/60 bg-slate-100/50 flex justify-between items-start sticky top-0 z-10 min-h-[56px]">
+        <div className="flex-1 pr-2">
+          {isEditingTitle && !isRestricted ? (
+            <input
+              autoFocus
+              value={editTitle}
+              onChange={(e) => setEditTitle(e.target.value)}
+              onBlur={handleSaveTitle}
+              onKeyDown={handleKeyDownTitle}
+              className="w-full text-[15px] font-bold text-slate-800 tracking-tight leading-snug bg-white border border-blue-400 rounded px-1.5 py-0.5 -mx-1.5 outline-none shadow-sm"
+            />
+          ) : (
+            <h3 
+              onClick={() => !isRestricted && setIsEditingTitle(true)}
+              className={`font-bold text-slate-700 tracking-tight leading-snug text-[15px] break-words whitespace-pre-wrap ${!isRestricted ? 'cursor-text hover:bg-slate-200/70 hover:text-slate-900 rounded px-1.5 py-0.5 -mx-1.5 transition-colors' : 'cursor-default'}`}
+              title={!isRestricted ? "Clique para renomear" : ""}
+            >
+              {column.title}
+            </h3>
+          )}
+        </div>
+        <span className="bg-white text-slate-500 text-[11px] font-bold px-2 py-0.5 rounded-full shadow-sm border border-slate-200 shrink-0 mt-0.5">{tasks.length}</span>
+      </div>
+      
+      {/* CORPO DA LISTA (DRAG & DROP) */}
+      <div className="p-3 flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-300 min-h-[150px]">
+        <SortableContext items={tasks.map(t => t.id)} strategy={verticalListSortingStrategy}>
+          <div className="flex flex-col gap-0 pb-2">
+            {tasks.map((task) => (
+              <TaskCard key={task.id} task={task} isRestricted={isRestricted} userId={userId} />
+            ))}
+          </div>
+        </SortableContext>
+        
+        {!isRestricted && (
+          <div className="mt-1">
+            {isAddingTask ? (
+              <div className="bg-white p-3 rounded-xl border border-blue-400 shadow-md transform transition-all">
+                <textarea autoFocus value={newTaskTitle} onChange={(e) => setNewTaskTitle(e.target.value)} onBlur={handleSaveTask} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSaveTask(); } if (e.key === 'Escape') setIsAddingTask(false); }} placeholder="O que precisa ser feito?" className="w-full text-sm font-medium text-slate-800 bg-transparent outline-none resize-none overflow-hidden leading-snug placeholder:text-slate-400 placeholder:font-normal" rows={2} />
+              </div>
+            ) : (
+              <button onClick={() => setIsAddingTask(true)} className="w-full flex items-center gap-2 py-2.5 px-3 text-sm font-semibold text-slate-500 hover:text-blue-600 hover:bg-white rounded-xl transition-all border border-transparent hover:border-blue-200 hover:shadow-sm">
+                <Plus size={16} /> Adicionar Cartão
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+EOF
+
+echo "🚀 2. Recompilando o Frontend..."
+cd apps/web && pnpm run build
+cd ../..
+
+echo "✅=========================================================="
+echo "🎯 CONSISTÊNCIA ALCANÇADA! LISTAS AGORA SÃO EDITÁVEIS."
+echo "✅=========================================================="

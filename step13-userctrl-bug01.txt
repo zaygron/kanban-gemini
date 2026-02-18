@@ -1,0 +1,26 @@
+#!/bin/bash
+set -e
+
+echo "🔌 1. Frontend: Criando o centralizador de WebSockets (Alta Performance)..."
+
+mkdir -p apps/web/src/lib
+
+cat << 'EOF' > apps/web/src/lib/socket.ts
+import { io } from 'socket.io-client';
+
+// Conecta automaticamente na nossa API NestJS
+const URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
+// O autoConnect: false garante que o túnel só seja aberto quando o usuário entrar num Quadro
+export const socket = io(URL, {
+  autoConnect: false,
+});
+EOF
+
+echo "🚀 2. Recompilando o Frontend..."
+cd apps/web && pnpm run build
+cd ../..
+
+echo "✅=========================================================="
+echo "🎯 SUCESSO! O FIO DO WEBSOCKET FOI CONECTADO."
+echo "✅=========================================================="

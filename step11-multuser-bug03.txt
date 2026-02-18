@@ -1,0 +1,149 @@
+#!/bin/bash
+set -e
+
+echo "🩹 1. Frontend: Ajustando o desempacotamento do Axios no Modal de Convite..."
+
+cat << 'EOF' > apps/web/src/components/board/ShareModal.tsx
+import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { X, UserPlus, Mail, ShieldAlert, Trash2 } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
+
+export function ShareModal({ boardId, onClose, isOwner }: { boardId: string, onClose: () => void, isOwner: boolean }) {
+  const queryClient = useQueryClient();
+  const [email, setEmail] = useState('');
+  
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['boardMembers', boardId],
+    queryFn: async () => (await api.get(`/kanban/board/${boardId}/members`)).data
+  });
+
+  const inviteMutation = useMutation({
+    // O GRANDE AJUSTE: Desempacotamos o pacote pegando o '.data' da resposta do Axios
+    mutationFn: async (inviteEmail: string) => {
+      const { data } = await api.post(`/kanban/board/${boardId}/members`, { email: inviteEmail });
+      return data;
+    },
+    onSuccess: (resData) => {
+      toast.success(resData.message || 'Convite enviado com sucesso!');
+      setEmail('');
+      queryClient.invalidateQueries({ queryKey: ['boardMembers', boardId] });
+      queryClient.invalidateQueries({ queryKey: ['board', boardId] });
+    },
+    onError: (err: any) => {
+      toast.error(err.response?.data?.message || 'Erro ao enviar o convite.');
+    }
+  });
+
+  const removeMutation = useMutation({
+    // Aplicando a mesma blindagem na remoção
+    mutationFn: async (memberId: string) => {
+      const { data } = await api.delete(`/kanban/board/${boardId}/members/${memberId}`);
+      return data;
+    },
+    onSuccess: () => {
+      toast.success('Membro removido!');
+      queryClient.invalidateQueries({ queryKey: ['boardMembers', boardId] });
+      queryClient.invalidateQueries({ queryKey: ['board', boardId] });
+    },
+    onError: (err: any) => toast.error(err.response?.data?.message || 'Erro ao remover membro.')
+  });
+
+  const handleInvite = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (email.trim()) inviteMutation.mutate(email.trim());
+  };
+
+  if (!mounted) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity" onClick={onClose}></div>
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col animate-in fade-in zoom-in-95 duration-200 overflow-hidden">
+        
+        <div className="flex items-center justify-between p-5 border-b border-slate-100 bg-slate-50 rounded-t-2xl">
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2"><UserPlus size={20} className="text-blue-600"/> Equipe do Quadro</h2>
+          <button onClick={onClose} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-full transition-colors"><X size={20} /></button>
+        </div>
+        
+        <div className="p-6 space-y-6">
+          {isOwner && (
+            <>
+              <div className="bg-blue-50/50 p-4 rounded-xl border border-blue-100">
+                <p className="text-sm text-slate-600 leading-relaxed">
+                  Digite o e-mail do usuário que deseja convidar. Ele <strong>precisa ter uma conta cadastrada</strong> no sistema para acessar.
+                </p>
+              </div>
+              
+              <form onSubmit={handleInvite} className="flex gap-2">
+                <div className="relative flex-1">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400"><Mail size={16} /></div>
+                  <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="E-mail do convidado..." className="w-full pl-10 pr-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all bg-slate-50 focus:bg-white" required />
+                </div>
+                <button type="submit" disabled={inviteMutation.isPending || !email} className="bg-blue-600 text-white font-semibold px-4 py-2.5 rounded-xl text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-sm shadow-blue-600/20">
+                  {inviteMutation.isPending ? 'Enviando...' : 'Convidar'}
+                </button>
+              </form>
+            </>
+          )}
+
+          <div className="space-y-3 pt-2">
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Membros com Acesso</h3>
+            {isLoading ? (
+              <div className="text-sm text-slate-500 text-center py-4">Carregando equipe...</div>
+            ) : (
+              <div className="space-y-2 max-h-48 overflow-y-auto scrollbar-thin pr-1">
+                {/* Dono do Quadro */}
+                <div className="flex items-center justify-between bg-slate-50 border border-slate-100 p-2.5 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-xs uppercase">{data?.owner?.name?.substring(0, 2)}</div>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800 leading-none">{data?.owner?.name}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">{data?.owner?.email}</p>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded uppercase flex items-center gap-1"><ShieldAlert size={10} /> Admin</span>
+                </div>
+
+                {/* Convidados */}
+                {data?.members?.map((m: any) => (
+                  <div key={m.id} className="flex items-center justify-between bg-white border border-slate-100 p-2.5 rounded-lg group hover:border-blue-100 transition-colors">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs uppercase">{m.name?.substring(0, 2)}</div>
+                      <div>
+                        <p className="text-sm font-semibold text-slate-800 leading-none">{m.name}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">{m.email}</p>
+                      </div>
+                    </div>
+                    {isOwner ? (
+                      <button onClick={() => { if (confirm(`Remover ${m.name} deste quadro?`)) removeMutation.mutate(m.memberId); }} className="text-slate-300 hover:text-red-500 p-1.5 rounded-md hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100" title="Remover Membro">
+                        <Trash2 size={16} />
+                      </button>
+                    ) : (
+                      <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded uppercase">Membro</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+EOF
+
+echo "🚀 2. Recompilando o Frontend..."
+cd apps/web && pnpm run build
+cd ../..
+
+echo "✅=========================================================="
+echo "🎯 CORREÇÃO APLICADA! A TELA DE CONVITES ESTÁ PRONTA."
+echo "✅=========================================================="

@@ -1,0 +1,15 @@
+node -e "
+const fs = require('fs');
+
+// 1. Ensina a API o que é o comando 'dev'
+const apiPath = './apps/api/package.json';
+const apiPkg = JSON.parse(fs.readFileSync(apiPath, 'utf8'));
+apiPkg.scripts.dev = 'nest start --watch';
+fs.writeFileSync(apiPath, JSON.stringify(apiPkg, null, 2));
+
+// 2. Garante a sintaxe explícita do pnpm na raiz
+const rootPath = './package.json';
+const rootPkg = JSON.parse(fs.readFileSync(rootPath, 'utf8'));
+rootPkg.scripts.dev = 'pnpm -r --parallel run dev';
+fs.writeFileSync(rootPath, JSON.stringify(rootPkg, null, 2));
+"

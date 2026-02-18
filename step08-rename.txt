@@ -1,0 +1,313 @@
+#!/bin/bash
+set -e
+
+echo "⚙️ 1. Backend: Adicionando rotas de Edição (PATCH) para Quadros, Listas e Tarefas..."
+
+cat << 'EOF' > apps/api/src/kanban/kanban.controller.ts
+import { Controller, Get, Post, Body, Patch, Param, Delete, Request, UseGuards } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { EventsGateway } from '../events/events.gateway';
+import { KanbanGuard } from '../auth/kanban.guard';
+
+function toRank(order: number): string { return Number(order || 0).toFixed(5).padStart(20, '0'); }
+
+@UseGuards(KanbanGuard)
+@Controller('kanban')
+export class KanbanController {
+  constructor(private prisma: PrismaService, private events: EventsGateway) {}
+
+  @Get('board/:id')
+  async getBoard(@Param('id') id: string) {
+    const board = await this.prisma.board.findUnique({
+      where: { id }, include: { lists: { include: { cards: { orderBy: { rank: 'asc' } } }, orderBy: { rank: 'asc' } } }
+    });
+    if (!board) return null;
+    return {
+      ...board,
+      columns: board.lists.map((list: any) => ({
+        id: list.id, title: list.title, order: parseFloat(list.rank), boardId: list.boardId,
+        tasks: list.cards.map((card: any) => ({ id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId }))
+      }))
+    };
+  }
+
+  // NOVO: Rota para renomear o Quadro
+  @Patch('board/:id')
+  async updateBoard(@Param('id') id: string, @Body() body: { name: string }) {
+    const board = await this.prisma.board.update({ where: { id }, data: { name: body.name } });
+    this.events.server.emit('boardUpdated', { boardId: id });
+    return board;
+  }
+
+  @Post('columns')
+  async createColumn(@Body() body: { title: string; boardId: string; order: number }) {
+    const list = await this.prisma.list.create({ data: { title: body.title, boardId: body.boardId, rank: toRank(body.order) } });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: list.id, title: list.title, order: parseFloat(list.rank), boardId: list.boardId };
+  }
+
+  // NOVO: Rota para renomear a Lista
+  @Patch('columns/:id')
+  async updateColumn(@Param('id') id: string, @Body() body: { title: string }) {
+    const list = await this.prisma.list.update({ where: { id }, data: { title: body.title } });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: list.id, title: list.title, order: parseFloat(list.rank), boardId: list.boardId };
+  }
+
+  @Post('tasks')
+  async createTask(@Request() req: any, @Body() body: { title: string; columnId: string; order: number }) {
+    const list = await this.prisma.list.findUnique({ where: { id: body.columnId } });
+    if (!list) return null;
+    const userId = req.user.sub || req.user.id; 
+    const card = await this.prisma.card.create({
+      data: { title: body.title, listId: body.columnId, rank: toRank(body.order), boardId: list.boardId, createdById: userId, status: 'TODO' }
+    });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId };
+  }
+
+  // ATUALIZADO: Agora aceita atualização de título do Cartão também
+  @Patch('tasks/:id')
+  async updateTask(@Param('id') id: string, @Body() body: { columnId?: string; order?: number; title?: string }) {
+    const data: any = {};
+    if (body.columnId) data.listId = body.columnId;
+    if (body.order !== undefined) data.rank = toRank(body.order);
+    if (body.title) data.title = body.title;
+
+    const card = await this.prisma.card.update({ where: { id }, data });
+    this.events.server.emit('boardUpdated', { boardId: card.boardId });
+    return { id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId };
+  }
+
+  @Delete('tasks/:id')
+  async deleteTask(@Param('id') id: string) {
+    const card = await this.prisma.card.findUnique({ where: { id }});
+    if (!card) return null;
+    await this.prisma.card.delete({ where: { id } });
+    this.events.server.emit('boardUpdated', { boardId: card.boardId });
+    return { success: true };
+  }
+}
+EOF
+
+echo "🎨 2. Frontend: Transformando Textos em Inputs Inteligentes (TaskCard)..."
+cat << 'EOF' > apps/web/src/components/board/TaskCard.tsx
+import { useState, useEffect } from 'react';
+import { useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { GripVertical, Trash2 } from 'lucide-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
+
+export function TaskCard({ task, isOverlay }: { task: any, isOverlay?: boolean }) {
+  const queryClient = useQueryClient();
+  const [isEditing, setIsEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState(task.title);
+
+  useEffect(() => { setEditTitle(task.title); }, [task.title]);
+
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: task.id, data: { type: 'Task', task } });
+
+  const updateTaskMutation = useMutation({
+    mutationFn: async (newTitle: string) => await api.patch(`/kanban/tasks/${task.id}`, { title: newTitle }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board'] }),
+  });
+
+  const deleteTaskMutation = useMutation({
+    mutationFn: async () => await api.delete(`/kanban/tasks/${task.id}`),
+    onSuccess: () => { toast.success('Tarefa excluída!'); queryClient.invalidateQueries({ queryKey: ['board'] }); },
+  });
+
+  const handleSave = () => {
+    setIsEditing(false);
+    if (editTitle.trim() && editTitle.trim() !== task.title) updateTaskMutation.mutate(editTitle.trim());
+    else setEditTitle(task.title);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave(); }
+    if (e.key === 'Escape') { setIsEditing(false); setEditTitle(task.title); }
+  };
+
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging && !isOverlay ? 0.3 : 1 };
+
+  return (
+    <div ref={setNodeRef} style={style} className={`group bg-white p-3 rounded-xl shadow-sm border flex gap-2 items-start relative ${isOverlay ? 'border-blue-500 shadow-xl rotate-2 scale-105 z-50' : 'border-slate-200 hover:border-blue-300 mb-3'}`}>
+      <div {...attributes} {...listeners} className="mt-0.5 text-slate-300 hover:text-blue-500 cursor-grab active:cursor-grabbing outline-none touch-none"><GripVertical size={16} /></div>
+      <div className="flex-1 pr-6">
+        {isEditing && !isOverlay ? (
+          <textarea
+            autoFocus value={editTitle} onChange={(e) => setEditTitle(e.target.value)} onBlur={handleSave} onKeyDown={handleKeyDown} onPointerDown={(e) => e.stopPropagation()}
+            className="w-full text-sm font-medium text-slate-800 bg-blue-50 border border-blue-400 rounded px-1 -mx-1 outline-none resize-none overflow-hidden leading-snug"
+            rows={1} onInput={(e) => { const target = e.target as HTMLTextAreaElement; target.style.height = 'auto'; target.style.height = `${target.scrollHeight}px`; }}
+          />
+        ) : (
+          <p onClick={() => !isOverlay && setIsEditing(true)} className="text-sm font-medium text-slate-800 leading-snug break-words cursor-text hover:bg-slate-50 rounded px-1 -mx-1 transition-colors whitespace-pre-wrap min-h-[20px]" title="Clique para editar">{task.title}</p>
+        )}
+      </div>
+      {!isOverlay && !isEditing && (
+        <button onClick={(e) => { e.stopPropagation(); if (confirm('Excluir esta tarefa?')) deleteTaskMutation.mutate(); }} className="absolute right-2 top-3 text-slate-300 hover:text-red-500 hover:bg-red-50 p-1.5 rounded-md transition-colors opacity-0 group-hover:opacity-100"><Trash2 size={14} /></button>
+      )}
+    </div>
+  );
+}
+EOF
+
+echo "🎨 3. Frontend: Transformando Textos em Inputs Inteligentes (Column)..."
+cat << 'EOF' > apps/web/src/components/board/Column.tsx
+import { useState, useEffect } from 'react';
+import { useDroppable } from '@dnd-core'; // Import ajustado pro script
+import { useDroppable as useDroppableDnd } from '@dnd-kit/core';
+import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { TaskCard } from './TaskCard';
+import { Plus } from 'lucide-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
+
+export function Column({ column, boardId }: { column: any, boardId: string }) {
+  const { setNodeRef } = useDroppableDnd({ id: column.id, data: { type: 'Column', column } });
+  const [isAdding, setIsAdding] = useState(false);
+  const [title, setTitle] = useState('');
+  
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [editTitle, setEditTitle] = useState(column.title);
+  const queryClient = useQueryClient();
+
+  useEffect(() => { setEditTitle(column.title); }, [column.title]);
+
+  const updateColumnMutation = useMutation({
+    mutationFn: async (newTitle: string) => await api.patch(`/kanban/columns/${column.id}`, { title: newTitle }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board', boardId] }),
+  });
+
+  const addTaskMutation = useMutation({
+    mutationFn: async (t: string) => {
+      const order = column.tasks?.length > 0 ? column.tasks[column.tasks.length - 1].order + 1000 : 1000;
+      await api.post('/kanban/tasks', { title: t, columnId: column.id, order });
+    },
+    onSuccess: () => { toast.success('Tarefa criada!'); queryClient.invalidateQueries({ queryKey: ['board', boardId] }); setIsAdding(false); setTitle(''); },
+  });
+
+  const handleSaveTitle = () => {
+    setIsEditingTitle(false);
+    if (editTitle.trim() && editTitle.trim() !== column.title) updateColumnMutation.mutate(editTitle.trim());
+    else setEditTitle(column.title);
+  };
+
+  return (
+    <div className="bg-slate-100/90 rounded-2xl w-[320px] shrink-0 flex flex-col max-h-full border border-slate-200 shadow-sm">
+      <div className="p-4 flex items-center justify-between border-b border-slate-200/60 bg-slate-100/50 rounded-t-2xl group">
+        {isEditingTitle ? (
+          <input autoFocus value={editTitle} onChange={(e) => setEditTitle(e.target.value)} onBlur={handleSaveTitle} onPointerDown={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === 'Enter') handleSaveTitle(); else if (e.key === 'Escape') { setIsEditingTitle(false); setEditTitle(column.title); } }} className="flex-1 font-semibold text-slate-800 bg-white border border-blue-400 rounded px-2 py-0.5 outline-none mr-2 min-w-0" />
+        ) : (
+          <h3 onClick={() => setIsEditingTitle(true)} className="flex-1 font-semibold text-slate-800 tracking-tight cursor-text hover:bg-slate-200/50 rounded px-2 py-0.5 -mx-2 transition-colors truncate" title="Clique para editar">{column.title}</h3>
+        )}
+        <span className="bg-white border border-slate-200 text-slate-600 text-xs px-2 py-0.5 rounded-full font-bold ml-2 shrink-0">{column.tasks?.length || 0}</span>
+      </div>
+      <div ref={setNodeRef} className="flex-1 overflow-y-auto p-3 min-h-[150px] scrollbar-thin">
+        <SortableContext items={(column.tasks || []).map((t: any) => t.id)} strategy={verticalListSortingStrategy}>
+          {(column.tasks || []).map((task: any) => <TaskCard key={task.id} task={task} />)}
+        </SortableContext>
+        {isAdding ? (
+          <form onSubmit={(e) => { e.preventDefault(); if (title.trim()) addTaskMutation.mutate(title); }} className="mt-1">
+            <input autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="O que será feito?" className="w-full text-sm px-3 py-2.5 border border-slate-300 shadow-sm rounded-xl outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all" />
+            <div className="flex gap-2 mt-2">
+              <button type="submit" disabled={addTaskMutation.isPending} className="bg-blue-600 text-white text-xs px-4 py-2 rounded-lg hover:bg-blue-700 font-medium">Salvar</button>
+              <button type="button" onClick={() => setIsAdding(false)} className="text-slate-500 hover:bg-slate-200 text-xs px-3 py-2 rounded-lg font-medium">Cancelar</button>
+            </div>
+          </form>
+        ) : (
+          <button onClick={() => setIsAdding(true)} className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-800 w-full p-2.5 hover:bg-slate-200/70 rounded-xl transition-all mt-1 font-medium"><Plus size={18} /> Adicionar Cartão</button>
+        )}
+      </div>
+    </div>
+  );
+}
+EOF
+
+echo "🎨 4. Frontend: Transformando o Título do Quadro (Board Header)..."
+cat << 'EOF' > apps/web/src/app/board/\[id\]/page.tsx
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import { Board } from '@/components/board/Board';
+import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { ArrowLeft, Loader2, LayoutDashboard, Edit2 } from 'lucide-react';
+
+export default function BoardPage() {
+  const { id } = useParams();
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  
+  const [isEditingBoard, setIsEditingBoard] = useState(false);
+  const [boardName, setBoardName] = useState('');
+
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['board', id],
+    queryFn: async () => (await api.get(`/kanban/board/${id}`)).data,
+    retry: false
+  });
+
+  useEffect(() => { if (isError) router.replace('/'); }, [isError, router]);
+  useEffect(() => { if (data?.name && !isEditingBoard) setBoardName(data.name); }, [data?.name, isEditingBoard]);
+
+  const updateBoardMutation = useMutation({
+    mutationFn: async (newName: string) => await api.patch(`/kanban/board/${id}`, { name: newName }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['board', id] });
+      queryClient.invalidateQueries({ queryKey: ['boards'] });
+    },
+  });
+
+  const handleSaveBoardName = () => {
+    setIsEditingBoard(false);
+    if (boardName.trim() && boardName.trim() !== data?.name) updateBoardMutation.mutate(boardName.trim());
+    else setBoardName(data?.name || '');
+  };
+
+  if (isLoading) return <div className="min-h-screen flex items-center justify-center text-slate-500 font-medium gap-3"><Loader2 className="animate-spin text-blue-500" size={28} /> Sincronizando...</div>;
+  if (!data) return null;
+
+  return (
+    <div className="h-screen bg-slate-50 flex flex-col overflow-hidden">
+      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm shrink-0 z-10">
+        <div className="flex items-center gap-4">
+          <Link href="/" className="text-slate-400 hover:text-blue-600 transition-colors p-2 hover:bg-blue-50 rounded-full"><ArrowLeft size={20} /></Link>
+          <div className="h-6 w-px bg-slate-200"></div>
+          <div className="flex items-center gap-2 text-blue-600 group">
+            <LayoutDashboard size={24} />
+            {isEditingBoard ? (
+              <input autoFocus value={boardName} onChange={(e) => setBoardName(e.target.value)} onBlur={handleSaveBoardName} onKeyDown={(e) => { if (e.key === 'Enter') handleSaveBoardName(); else if (e.key === 'Escape') { setIsEditingBoard(false); setBoardName(data.name); } }} className="text-xl font-bold text-slate-900 tracking-tight bg-blue-50 border border-blue-400 rounded px-2 -mx-2 outline-none w-64" />
+            ) : (
+              <div onClick={() => setIsEditingBoard(true)} className="flex items-center gap-2 cursor-text hover:bg-slate-100 rounded px-2 py-0.5 -mx-2 transition-colors" title="Editar nome do quadro">
+                <h1 className="text-xl font-bold text-slate-900 tracking-tight">{data.name}</h1>
+                <Edit2 size={14} className="text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity" />
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-full text-xs font-bold text-emerald-700 shadow-sm">
+          <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" /> Tempo Real
+        </div>
+      </header>
+      <main className="flex-1 p-6 overflow-x-auto overflow-y-hidden bg-[url('https://www.transparenttextures.com/patterns/cubes.png')]">
+        <Board initialData={data} />
+      </main>
+    </div>
+  );
+}
+EOF
+
+echo "🚀 3. Recompilando Todo o Ecossistema para aplicar o MVP Upgrade..."
+cd apps/api && pnpm run build
+cd ../web && pnpm run build
+cd ../..
+
+echo "✅=========================================================="
+echo "🎯 INLINE EDIT IMPLEMENTADO COM SUCESSO NOS 3 NÍVEIS!"
+echo "✅=========================================================="

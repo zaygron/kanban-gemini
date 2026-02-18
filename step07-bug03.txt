@@ -1,0 +1,90 @@
+#!/bin/bash
+set -e
+
+echo "🌱 1. Injetando o Usuário Master no Banco de Dados..."
+cd apps/api
+node -e "
+const { PrismaClient } = require('@prisma/client');
+const bcrypt = require('bcrypt');
+const prisma = new PrismaClient();
+
+async function main() {
+  try {
+    const hash = await bcrypt.hash('123456', 10);
+    await prisma.user.upsert({
+      where: { email: 'owner@kanban.com' },
+      update: { password: hash },
+      create: { email: 'owner@kanban.com', name: 'Tech Lead Kanban', password: hash }
+    });
+    console.log('✅ SUCESSO! Usuário owner@kanban.com criado com senha criptografada.');
+  } catch (err) {
+    console.error('Erro ao criar usuário:', err);
+  } finally {
+    await prisma.\$disconnect();
+  }
+}
+main();
+"
+cd ../..
+
+echo "🌐 2. Flexibilizando a Segurança de Rede (CORS) para IPv4 e Localhost..."
+cat << 'EOF' > apps/api/src/main.ts
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import * as cookieParser from 'cookie-parser';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  
+  // Aceita conexões das duas formas
+  app.enableCors({
+    origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+    credentials: true,
+  });
+  
+  app.use(cookieParser());
+  
+  // O 0.0.0.0 garante que a API escute em todas as placas de rede do PC
+  await app.listen(3001, '0.0.0.0');
+}
+bootstrap();
+EOF
+
+echo "🔗 3. Ensinando o Frontend a identificar o IP automaticamente..."
+cat << 'EOF' > apps/web/src/lib/api.ts
+import axios from 'axios';
+
+const isBrowser = typeof window !== 'undefined';
+// Descobre dinamicamente se você está usando localhost ou 127.0.0.1
+const targetUrl = isBrowser && window.location.hostname === '127.0.0.1' 
+  ? 'http://127.0.0.1:3001' 
+  : 'http://localhost:3001';
+
+export const api = axios.create({
+  baseURL: targetUrl,
+  withCredentials: true,
+});
+EOF
+
+node -e "
+const fs = require('fs');
+const boardPath = 'apps/web/src/components/board/Board.tsx';
+if (fs.existsSync(boardPath)) {
+  let content = fs.readFileSync(boardPath, 'utf8');
+  content = content.replace(
+    /io\(['\"]http:\/\/localhost:3001['\"]/g, 
+    'io(typeof window !== \"undefined\" && window.location.hostname === \"127.0.0.1\" ? \"http://127.0.0.1:3001\" : \"http://localhost:3001\"'
+  );
+  fs.writeFileSync(boardPath, content);
+}
+"
+
+echo "🏗️ 4. Recompilando o ecossistema..."
+cd apps/api && pnpm run build
+cd ../web && pnpm run build
+cd ../..
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 ACESSO LIBERADO! Portas abertas para o Tech Lead."
+echo "✅=========================================================="

@@ -1,0 +1,79 @@
+#!/bin/bash
+set -e
+
+echo "🌐 1. Ensinando a API a escutar IPv4 e IPv6 simultaneamente..."
+cat << 'EOF' > apps/api/src/main.ts
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import { PrismaService } from './prisma/prisma.service';
+import * as bcrypt from 'bcryptjs';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  
+  const prisma = app.get(PrismaService);
+  const userExists = await prisma.user.findUnique({ where: { email: 'owner@kanban.com' } });
+  
+  if (!userExists) {
+    const hash = await bcrypt.hash('123456', 10);
+    await prisma.user.create({
+      data: { email: 'owner@kanban.com', name: 'Tech Lead Kanban', passwordHash: hash }
+    });
+  }
+
+  // origin: true faz a API espelhar a origem dinamicamente (aceita qualquer IP que o navegador mandar)
+  app.enableCors({
+    origin: true,
+    credentials: true,
+  });
+  
+  const cookieParser = require('cookie-parser');
+  app.use(cookieParser());
+  
+  // Remover o '0.0.0.0' daqui obriga o Node.js a escutar nas duas redes (IPv4 e IPv6) nativamente!
+  await app.listen(3001);
+}
+bootstrap();
+EOF
+
+echo "🔗 2. Ensinando o Frontend (Axios) a espelhar a rede do navegador..."
+cat << 'EOF' > apps/web/src/lib/api.ts
+import axios from 'axios';
+
+// Captura a URL exata do seu navegador (com [::1]) e só troca a porta de 3000 para 3001
+const getBaseUrl = () => {
+  if (typeof window !== 'undefined') {
+    return window.location.origin.replace(':3000', ':3001');
+  }
+  return 'http://localhost:3001';
+};
+
+export const api = axios.create({
+  baseURL: getBaseUrl(),
+  withCredentials: true,
+});
+EOF
+
+echo "⚙️ 3. Aplicando a mesma inteligência Camaleão aos WebSockets..."
+node -e "
+const fs = require('fs');
+const boardPath = 'apps/web/src/components/board/Board.tsx';
+if (fs.existsSync(boardPath)) {
+  let content = fs.readFileSync(boardPath, 'utf8');
+  content = content.replace(
+    /io\([^,]+,/g, 
+    \"io(typeof window !== 'undefined' ? window.location.origin.replace(':3000', ':3001') : 'http://localhost:3001',\"
+  );
+  fs.writeFileSync(boardPath, content);
+}
+"
+
+echo "🏗️ 4. Recompilando o ecossistema com a Rede Universal..."
+cd apps/api && pnpm run build
+cd ../web && pnpm run build
+cd ../..
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 REDE 100% DINÂMICA! O CÓDIGO SE ADAPTA AO SEU BROWSER."
+echo "✅=========================================================="

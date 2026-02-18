@@ -1,0 +1,79 @@
+#!/bin/bash
+set -e
+
+echo "🌱 1. Ensinando o Servidor a Auto-Criar o Usuário Master..."
+cat << 'EOF' > apps/api/src/main.ts
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import * as cookieParser from 'cookie-parser';
+import { PrismaService } from './prisma/prisma.service';
+import * as bcrypt from 'bcrypt';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  
+  // 🚀 O Servidor se auto-inspeciona ao ligar
+  const prisma = app.get(PrismaService);
+  const userExists = await prisma.user.findUnique({ where: { email: 'owner@kanban.com' } });
+  
+  if (!userExists) {
+    const hash = await bcrypt.hash('123456', 10);
+    await prisma.user.create({
+      data: { email: 'owner@kanban.com', name: 'Tech Lead Kanban', password: hash }
+    });
+    console.log('\n✅ CONTA MASTER CRIADA: owner@kanban.com (Senha: 123456)\n');
+  }
+
+  // Flexibiliza o CORS para aceitar conexões via IPv4 (127.0.0.1) e IPv6 (localhost)
+  app.enableCors({
+    origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+    credentials: true,
+  });
+  
+  app.use(cookieParser());
+  
+  // O 0.0.0.0 garante que a API escute em todas as placas de rede do PC
+  await app.listen(3001, '0.0.0.0');
+}
+bootstrap();
+EOF
+
+echo "🌐 2. Adaptando as chamadas HTTP do Frontend para a Rede correta..."
+cat << 'EOF' > apps/web/src/lib/api.ts
+import axios from 'axios';
+
+// Detecta automaticamente se o navegador está usando localhost ou 127.0.0.1
+const isBrowser = typeof window !== 'undefined';
+const targetUrl = isBrowser && window.location.hostname === '127.0.0.1' 
+  ? 'http://127.0.0.1:3001' 
+  : 'http://localhost:3001';
+
+export const api = axios.create({
+  baseURL: targetUrl,
+  withCredentials: true,
+});
+EOF
+
+echo "⚙️ 3. Adaptando a conexão dos WebSockets..."
+node -e "
+const fs = require('fs');
+const boardPath = 'apps/web/src/components/board/Board.tsx';
+if (fs.existsSync(boardPath)) {
+  let content = fs.readFileSync(boardPath, 'utf8');
+  content = content.replace(
+    /io\(['\"]http:\/\/localhost:3001['\"]/g, 
+    'io(typeof window !== \"undefined\" && window.location.hostname === \"127.0.0.1\" ? \"http://127.0.0.1:3001\" : \"http://localhost:3001\"'
+  );
+  fs.writeFileSync(boardPath, content);
+}
+"
+
+echo "🏗️ 4. Recompilando o ecossistema com o Auto-Seeder..."
+cd apps/api && pnpm run build
+cd ../web && pnpm run build
+cd ../..
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 SISTEMA DE REDE E AUTO-CRIAÇÃO CONFIGURADOS!"
+echo "✅=========================================================="

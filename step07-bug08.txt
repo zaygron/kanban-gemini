@@ -1,0 +1,56 @@
+#!/bin/bash
+set -e
+
+echo "🚧 1. Alinhando a Controladora de Quadros com o Banco de Dados Real..."
+
+cat << 'EOF' > apps/api/src/app.controller.ts
+import { Controller, Get, Post, Body, Request, UseGuards } from '@nestjs/common';
+import { PrismaService } from './prisma/prisma.service';
+import { KanbanGuard } from './auth/kanban.guard';
+
+@UseGuards(KanbanGuard)
+@Controller()
+export class AppController {
+  constructor(private prisma: PrismaService) {}
+
+  @Get('me')
+  async getProfile(@Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user) user.passwordHash = 'hidden'; // Esconde o hash por segurança
+    return { user: user || req.user };
+  }
+
+  // Busca simples e direta: Traz os quadros onde você é o criador
+  @Get('boards')
+  async getBoards(@Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    return this.prisma.board.findMany({
+      where: { createdById: userId },
+      orderBy: { createdAt: 'desc' }
+    });
+  }
+
+  // Criação limpa: Apenas Nome e o ID de quem criou
+  @Post('boards')
+  async createBoard(@Request() req: any, @Body() body: { name: string }) {
+    const userId = req.user?.sub || req.user?.id;
+    return this.prisma.board.create({
+      data: {
+        name: body.name,
+        createdById: userId
+      }
+    });
+  }
+}
+EOF
+
+echo "🏗️ 2. Recompilando o Backend API..."
+cd apps/api
+pnpm run build
+cd ../..
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 SUCESSO! A API ESTÁ 100% ALINHADA COM SEU BANCO DE DADOS."
+echo "✅=========================================================="

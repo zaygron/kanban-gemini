@@ -1,0 +1,762 @@
+#!/bin/bash
+set -e
+
+echo "⚙️ 1. Backend: Implementando a Segurança Armada na API (RBAC)..."
+
+cat << 'EOF' > apps/api/src/kanban/kanban.controller.ts
+import { Controller, Get, Post, Body, Patch, Param, Delete, Request, UseGuards, NotFoundException, UnauthorizedException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { EventsGateway } from '../events/events.gateway';
+import { KanbanGuard } from '../auth/kanban.guard';
+
+function toRank(order: number): string { return Number(order || 0).toFixed(5).padStart(20, '0'); }
+
+@UseGuards(KanbanGuard)
+@Controller('kanban')
+export class KanbanController {
+  constructor(private prisma: PrismaService, private events: EventsGateway) {}
+
+  // 🔥 O NOVO MOTOR DE SEGURANÇA: Verifica o crachá do usuário antes de qualquer ação
+  private async getPermissions(userId: string, boardId: string) {
+    const board = await this.prisma.board.findUnique({ where: { id: boardId }, include: { members: true } });
+    if (!board) throw new NotFoundException('Quadro não encontrado.');
+    const isOwner = board.createdById === userId;
+    const member = board.members.find(m => m.userId === userId);
+    const isRestricted = !isOwner && member?.role === 'RESTRICTED';
+    return { isOwner, isMember: !!member, isRestricted, role: isOwner ? 'OWNER' : (member?.role || 'NONE') };
+  }
+
+  @Get('board/:id')
+  async getBoard(@Param('id') id: string, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const { isOwner, isMember, role } = await this.getPermissions(userId, id);
+    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+
+    const board = await this.prisma.board.findUnique({
+      where: { id },
+      include: { lists: { include: { cards: { orderBy: { rank: 'asc' } } }, orderBy: { rank: 'asc' } } }
+    });
+    
+    return {
+      ...board,
+      userRole: role, // 🔥 Devolvemos o cargo para o Frontend saber o que travar
+      columns: board?.lists.map((list: any) => ({
+        id: list.id, title: list.title, order: parseFloat(list.rank), boardId: list.boardId,
+        tasks: list.cards.map((card: any) => ({ 
+          id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId,
+          description: card.description, priority: card.priority, startDate: card.startDate, dueDate: card.dueDate, assignedTo: card.assignedTo
+        }))
+      }))
+    };
+  }
+
+  @Get('board/:id/members')
+  async getMembers(@Param('id') id: string, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const { isOwner, isMember } = await this.getPermissions(userId, id);
+    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+
+    const board = await this.prisma.board.findUnique({ where: { id }, include: { members: { include: { user: true } } } });
+    const owner = await this.prisma.user.findUnique({ where: { id: board?.createdById } });
+    return {
+      owner: { id: owner?.id, name: owner?.name, email: owner?.email },
+      members: board?.members.map((m: any) => ({ id: m.user.id, name: m.user.name, email: m.user.email, role: m.role, memberId: m.id }))
+    };
+  }
+
+  @Post('board/:id/members')
+  async addMember(@Param('id') id: string, @Body() body: { email: string; role: string }, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const { isOwner } = await this.getPermissions(userId, id);
+    if (!isOwner) throw new ForbiddenException('Apenas o dono pode gerenciar a equipe.');
+
+    const invitee = await this.prisma.user.findUnique({ where: { email: body.email } });
+    if (!invitee) throw new BadRequestException('Usuário não encontrado.');
+    if (invitee.id === userId) throw new BadRequestException('Você já é o dono.');
+
+    const existing = await this.prisma.boardMember.findUnique({ where: { boardId_userId: { boardId: id, userId: invitee.id } } });
+    if (existing) throw new BadRequestException('Usuário já é membro.');
+
+    // 🔥 GRAVAMOS O CARGO NO BANCO AQUI
+    await this.prisma.boardMember.create({ data: { boardId: id, userId: invitee.id, role: body.role || 'MEMBER' } });
+    this.events.server.emit('boardUpdated', { boardId: id });
+    return { success: true, message: 'Usuário adicionado à equipe!' };
+  }
+
+  @Delete('board/:id/members/:memberId')
+  async removeMember(@Param('id') id: string, @Param('memberId') memberId: string, @Request() req: any) {
+     const userId = req.user?.sub || req.user?.id;
+     const { isOwner } = await this.getPermissions(userId, id);
+     if (!isOwner) throw new ForbiddenException('Apenas o dono pode remover membros.');
+     await this.prisma.boardMember.delete({ where: { id: memberId } });
+     this.events.server.emit('boardUpdated', { boardId: id });
+     return { success: true };
+  }
+
+  @Patch('board/:id')
+  async updateBoard(@Param('id') id: string, @Body() body: { name: string }, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const { isOwner } = await this.getPermissions(userId, id);
+    if (!isOwner) throw new ForbiddenException('Apenas o dono pode renomear.');
+    const updatedBoard = await this.prisma.board.update({ where: { id }, data: { name: body.name } });
+    this.events.server.emit('boardUpdated', { boardId: id });
+    return updatedBoard;
+  }
+
+  @Post('columns')
+  async createColumn(@Request() req: any, @Body() body: { title: string; boardId: string; order: number }) {
+    const userId = req.user?.sub || req.user?.id;
+    const { isOwner, isMember, isRestricted } = await this.getPermissions(userId, body.boardId);
+    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+    if (isRestricted) throw new ForbiddenException('Acesso Restrito: Você não pode criar listas.');
+
+    const list = await this.prisma.list.create({ data: { title: body.title, boardId: body.boardId, rank: toRank(body.order) } });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: list.id, title: list.title, order: parseFloat(list.rank), boardId: list.boardId };
+  }
+
+  @Patch('columns/:id')
+  async updateColumn(@Param('id') id: string, @Body() body: { title: string }, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const listCheck = await this.prisma.list.findUnique({ where: { id } });
+    if (!listCheck) throw new NotFoundException();
+    
+    const { isOwner, isMember, isRestricted } = await this.getPermissions(userId, listCheck.boardId);
+    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+    if (isRestricted) throw new ForbiddenException('Acesso Restrito: Você não pode renomear listas.');
+
+    const list = await this.prisma.list.update({ where: { id }, data: { title: body.title } });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: list.id, title: list.title, order: parseFloat(list.rank), boardId: list.boardId };
+  }
+
+  @Post('tasks')
+  async createTask(@Request() req: any, @Body() body: { title: string; columnId: string; order: number }) {
+    const userId = req.user.sub || req.user.id; 
+    const list = await this.prisma.list.findUnique({ where: { id: body.columnId } });
+    if (!list) throw new NotFoundException();
+    
+    const { isOwner, isMember, isRestricted } = await this.getPermissions(userId, list.boardId);
+    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+    if (isRestricted) throw new ForbiddenException('Acesso Restrito: Você não pode criar tarefas.');
+
+    const card = await this.prisma.card.create({
+      data: { title: body.title, listId: body.columnId, rank: toRank(body.order), boardId: list.boardId, createdById: userId, status: 'TODO' }
+    });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId, description: card.description, priority: card.priority, startDate: card.startDate, dueDate: card.dueDate, assignedTo: card.assignedTo };
+  }
+
+  @Patch('tasks/:id')
+  async updateTask(@Param('id') id: string, @Body() body: any, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const cardCheck = await this.prisma.card.findUnique({ where: { id } });
+    if (!cardCheck) throw new NotFoundException();
+
+    const { isOwner, isMember, isRestricted } = await this.getPermissions(userId, cardCheck.boardId);
+    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+    
+    // 🔥 A REGRA DE OURO B2B: Restrito só toca no que é dele!
+    if (isRestricted && cardCheck.assignedTo !== userId) {
+      throw new ForbiddenException('Você só tem permissão para mover ou editar tarefas atribuídas a você.');
+    }
+    // Restrito não pode passar a batata quente pra outro:
+    if (isRestricted && body.assignedTo !== undefined && body.assignedTo !== userId && body.assignedTo !== null) {
+      throw new ForbiddenException('Você não pode transferir a tarefa para outra pessoa.');
+    }
+
+    const data: any = {};
+    if (body.columnId !== undefined) data.listId = body.columnId;
+    if (body.order !== undefined) data.rank = toRank(body.order);
+    if (body.title !== undefined) data.title = body.title;
+    if (body.description !== undefined) data.description = body.description;
+    if (body.priority !== undefined) data.priority = body.priority;
+    if (body.startDate !== undefined) data.startDate = body.startDate ? new Date(body.startDate) : null;
+    if (body.dueDate !== undefined) data.dueDate = body.dueDate ? new Date(body.dueDate) : null;
+    if (body.assignedTo !== undefined) data.assignedTo = body.assignedTo || null;
+
+    const card = await this.prisma.card.update({ where: { id }, data });
+    this.events.server.emit('boardUpdated', { boardId: card.boardId });
+    return { id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId, description: card.description, priority: card.priority, startDate: card.startDate, dueDate: card.dueDate, assignedTo: card.assignedTo };
+  }
+
+  @Delete('tasks/:id')
+  async deleteTask(@Param('id') id: string, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const card = await this.prisma.card.findUnique({ where: { id }});
+    if (!card) throw new NotFoundException();
+
+    const { isOwner, isMember, isRestricted } = await this.getPermissions(userId, card.boardId);
+    if (!isOwner && !isMember) throw new UnauthorizedException();
+    // Operador restrito não pode APAGAR dados da empresa, mesmo que seja a tarefa dele.
+    if (isRestricted) throw new ForbiddenException('Acesso Negado: Apenas o criador do quadro pode deletar tarefas.');
+
+    await this.prisma.card.delete({ where: { id } });
+    this.events.server.emit('boardUpdated', { boardId: card.boardId });
+    return { success: true };
+  }
+}
+EOF
+
+echo "🎨 2. Frontend: Modal de Convite com Seletor de Cargos..."
+cat << 'EOF' > apps/web/src/components/board/ShareModal.tsx
+import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { X, UserPlus, Mail, ShieldAlert, Trash2, Shield, HardHat } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
+
+export function ShareModal({ boardId, onClose, isOwner }: { boardId: string, onClose: () => void, isOwner: boolean }) {
+  const queryClient = useQueryClient();
+  const [email, setEmail] = useState('');
+  const [role, setRole] = useState('MEMBER');
+  
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['boardMembers', boardId],
+    queryFn: async () => (await api.get(`/kanban/board/${boardId}/members`)).data
+  });
+
+  const inviteMutation = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.post(`/kanban/board/${boardId}/members`, { email: email.trim(), role });
+      return data;
+    },
+    onSuccess: (resData) => {
+      toast.success(resData.message || 'Convite enviado!');
+      setEmail('');
+      queryClient.invalidateQueries({ queryKey: ['boardMembers', boardId] });
+      queryClient.invalidateQueries({ queryKey: ['board', boardId] });
+    },
+    onError: (err: any) => toast.error(err.response?.data?.message || 'Erro ao enviar o convite.')
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: async (memberId: string) => await api.delete(`/kanban/board/${boardId}/members/${memberId}`),
+    onSuccess: () => {
+      toast.success('Membro removido!');
+      queryClient.invalidateQueries({ queryKey: ['boardMembers', boardId] });
+      queryClient.invalidateQueries({ queryKey: ['board', boardId] });
+    }
+  });
+
+  const handleInvite = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (email.trim()) inviteMutation.mutate();
+  };
+
+  if (!mounted) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity" onClick={onClose}></div>
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col animate-in fade-in zoom-in-95 duration-200 overflow-hidden">
+        
+        <div className="flex items-center justify-between p-5 border-b border-slate-100 bg-slate-50 rounded-t-2xl">
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2"><UserPlus size={20} className="text-blue-600"/> Equipe do Quadro</h2>
+          <button onClick={onClose} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-full transition-colors"><X size={20} /></button>
+        </div>
+        
+        <div className="p-6 space-y-6">
+          {isOwner && (
+            <form onSubmit={handleInvite} className="space-y-3 bg-slate-50 p-4 border border-slate-200 rounded-xl shadow-sm">
+              <h3 className="text-sm font-bold text-slate-700">Convidar Usuário</h3>
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400"><Mail size={16} /></div>
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="E-mail do convidado..." className="w-full pl-10 pr-3 py-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all bg-white" required />
+              </div>
+              <div className="flex gap-2">
+                <select value={role} onChange={(e) => setRole(e.target.value)} className="flex-1 border border-slate-200 rounded-lg px-3 py-2.5 text-sm outline-none bg-white cursor-pointer font-medium text-slate-700">
+                  <option value="MEMBER">⚡ Colaborador Total</option>
+                  <option value="RESTRICTED">👷 Operador Restrito</option>
+                </select>
+                <button type="submit" disabled={inviteMutation.isPending || !email} className="bg-blue-600 text-white font-bold px-4 py-2.5 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                  {inviteMutation.isPending ? 'Enviando...' : 'Adicionar'}
+                </button>
+              </div>
+            </form>
+          )}
+
+          <div className="space-y-3 pt-2">
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Membros com Acesso</h3>
+            {isLoading ? <div className="text-sm text-slate-500 text-center py-4">Carregando...</div> : (
+              <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                <div className="flex items-center justify-between bg-white border border-slate-100 p-2.5 rounded-lg shadow-sm">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-xs uppercase">{data?.owner?.name?.substring(0, 2)}</div>
+                    <div>
+                      <p className="text-sm font-bold text-slate-800 leading-none">{data?.owner?.name}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">{data?.owner?.email}</p>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded uppercase flex items-center gap-1"><ShieldAlert size={10} /> Admin</span>
+                </div>
+
+                {data?.members?.map((m: any) => (
+                  <div key={m.id} className="flex items-center justify-between bg-white border border-slate-100 p-2.5 rounded-lg group hover:border-blue-200 transition-colors shadow-sm">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs uppercase ${m.role === 'MEMBER' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-600'}`}>{m.name?.substring(0, 2)}</div>
+                      <div>
+                        <p className="text-sm font-bold text-slate-800 leading-none flex items-center gap-1">
+                          {m.name}
+                          {m.role === 'RESTRICTED' ? <span className="text-[9px] font-bold text-orange-600 bg-orange-100 px-1 py-0.5 rounded uppercase ml-1 flex items-center gap-1"><HardHat size={8}/> Restrito</span> : <span className="text-[9px] font-bold text-indigo-600 bg-indigo-100 px-1 py-0.5 rounded uppercase ml-1 flex items-center gap-1"><Shield size={8}/> Total</span>}
+                        </p>
+                        <p className="text-xs text-slate-500 mt-0.5">{m.email}</p>
+                      </div>
+                    </div>
+                    {isOwner && (
+                      <button onClick={() => { if (confirm(`Remover ${m.name}?`)) removeMutation.mutate(m.memberId); }} className="text-slate-300 hover:text-red-500 p-1.5 rounded-md hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100">
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+EOF
+
+echo "🎨 3. Frontend: Ocultando Botões de Criação na Interface Principal..."
+cat << 'EOF' > apps/web/src/components/board/Board.tsx
+import { useState, useEffect } from 'react';
+import { DndContext, DragOverlay, closestCorners, KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import { SortableContext, arrayMove, sortableKeyboardCoordinates, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { Column } from './Column';
+import { TaskCard } from './TaskCard';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
+import { socket } from '@/lib/socket';
+
+export function Board({ initialData }: { initialData: any }) {
+  const queryClient = useQueryClient();
+  const [columns, setColumns] = useState(initialData?.columns || []);
+  const [activeTask, setActiveTask] = useState<any>(null);
+
+  const { data: user } = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get('/me')).data.user });
+  const userId = user?.id;
+
+  const { data: boardData } = useQuery({
+    queryKey: ['board', initialData.id],
+    queryFn: async () => (await api.get(`/kanban/board/${initialData.id}`)).data,
+    initialData: initialData,
+  });
+
+  const isRestricted = boardData?.userRole === 'RESTRICTED';
+
+  useEffect(() => { if (boardData?.columns) setColumns(boardData.columns); }, [boardData]);
+
+  useEffect(() => {
+    socket.connect();
+    socket.on('boardUpdated', (data) => { if (data.boardId === initialData.id) queryClient.invalidateQueries({ queryKey: ['board', initialData.id] }); });
+    return () => { socket.off('boardUpdated'); };
+  }, [initialData.id, queryClient]);
+
+  const updateTaskPosition = useMutation({
+    mutationFn: async ({ taskId, columnId, order }: any) => await api.patch(`/kanban/tasks/${taskId}`, { columnId, order }),
+    onError: (err: any) => {
+      toast.error(err.response?.data?.message || 'Acesso negado.');
+      queryClient.invalidateQueries({ queryKey: ['board', initialData.id] });
+    }
+  });
+
+  const createColumnMutation = useMutation({
+    mutationFn: async (title: string) => await api.post('/kanban/columns', { title, boardId: initialData.id, order: columns.length }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board', initialData.id] })
+  });
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
+
+  const handleDragStart = (event: any) => {
+    const { active } = event;
+    const col = columns.find((c: any) => c.tasks.some((t: any) => t.id === active.id));
+    const task = col?.tasks.find((t: any) => t.id === active.id);
+    setActiveTask(task);
+  };
+
+  const handleDragOver = (event: any) => {
+    const { active, over } = event;
+    if (!over) return;
+    
+    const activeId = active.id;
+    const overId = over.id;
+    
+    const activeColIndex = columns.findIndex((c: any) => c.tasks.some((t: any) => t.id === activeId));
+    const overColIndex = columns.findIndex((c: any) => c.id === overId || c.tasks.some((t: any) => t.id === overId));
+
+    if (activeColIndex === -1 || overColIndex === -1 || activeColIndex === overColIndex) return;
+
+    setColumns((prev: any) => {
+      const activeCol = prev[activeColIndex];
+      const overCol = prev[overColIndex];
+      const taskIndex = activeCol.tasks.findIndex((t: any) => t.id === activeId);
+      const task = activeCol.tasks[taskIndex];
+
+      return prev.map((c: any, i: number) => {
+        if (i === activeColIndex) return { ...c, tasks: c.tasks.filter((t: any) => t.id !== activeId) };
+        if (i === overColIndex) {
+          const overTaskIndex = overCol.tasks.findIndex((t: any) => t.id === overId);
+          const newIndex = overTaskIndex >= 0 ? overTaskIndex : overCol.tasks.length;
+          const newTasks = [...overCol.tasks];
+          newTasks.splice(newIndex, 0, { ...task, columnId: overCol.id });
+          return { ...c, tasks: newTasks };
+        }
+        return c;
+      });
+    });
+  };
+
+  const handleDragEnd = (event: any) => {
+    setActiveTask(null);
+    const { active, over } = event;
+    if (!over) return;
+
+    const activeId = active.id;
+    const overId = over.id;
+
+    const activeColIndex = columns.findIndex((c: any) => c.tasks.some((t: any) => t.id === activeId));
+    if (activeColIndex === -1) return;
+
+    const activeCol = columns[activeColIndex];
+    const taskIndex = activeCol.tasks.findIndex((t: any) => t.id === activeId);
+    const task = activeCol.tasks[taskIndex];
+
+    const overColIndex = columns.findIndex((c: any) => c.id === overId || c.tasks.some((t: any) => t.id === overId));
+    const overCol = columns[overColIndex];
+    const overTaskIndex = overCol?.tasks.findIndex((t: any) => t.id === overId);
+
+    if (isRestricted && task.assignedTo !== userId) {
+      toast.error("Acesso Restrito: Apenas o responsável pode mover a tarefa.");
+      queryClient.invalidateQueries({ queryKey: ['board', initialData.id] });
+      return;
+    }
+
+    if (activeColIndex === overColIndex) {
+      if (taskIndex !== overTaskIndex) {
+        setColumns((prev: any) => {
+          const newCols = [...prev];
+          newCols[activeColIndex].tasks = arrayMove(newCols[activeColIndex].tasks, taskIndex, overTaskIndex);
+          return newCols;
+        });
+        updateTaskPosition.mutate({ taskId: activeId, columnId: activeCol.id, order: overTaskIndex });
+      }
+    } else {
+      updateTaskPosition.mutate({ taskId: activeId, columnId: overCol.id, order: overTaskIndex >= 0 ? overTaskIndex : overCol.tasks.length });
+    }
+  };
+
+  const handleAddColumn = () => {
+    const title = prompt('Nome da nova etapa:');
+    if (title) createColumnMutation.mutate(title);
+  };
+
+  return (
+    <DndContext sensors={sensors} collisionDetection={closestCorners} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
+      <div className="flex gap-6 h-full pb-4">
+        {columns.map((col: any) => (
+          <Column key={col.id} column={col} tasks={col.tasks} isRestricted={isRestricted} userId={userId} />
+        ))}
+        {!isRestricted && (
+          <div className="w-80 shrink-0">
+            <button onClick={handleAddColumn} disabled={createColumnMutation.isPending} className="w-full flex items-center justify-center gap-2 py-4 border-2 border-dashed border-slate-300 rounded-2xl text-slate-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50/50 transition-all font-semibold shadow-sm">
+              {createColumnMutation.isPending ? 'Criando...' : '+ Criar Nova Lista'}
+            </button>
+          </div>
+        )}
+      </div>
+      <DragOverlay>{activeTask ? <TaskCard task={activeTask} isRestricted={isRestricted} userId={userId} isOverlay /> : null}</DragOverlay>
+    </DndContext>
+  );
+}
+EOF
+
+cat << 'EOF' > apps/web/src/components/board/Column.tsx
+import { useSortable } from '@dnd-kit/sortable';
+import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { TaskCard } from './TaskCard';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import { useState } from 'react';
+import { Plus } from 'lucide-react';
+
+export function Column({ column, tasks, isRestricted, userId }: { column: any, tasks: any[], isRestricted: boolean, userId: string }) {
+  const queryClient = useQueryClient();
+  const { setNodeRef, isDragging } = useSortable({ id: column.id, data: { type: 'Column', column } });
+  
+  const [isAddingTask, setIsAddingTask] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+
+  const createTaskMutation = useMutation({
+    mutationFn: async (title: string) => await api.post('/kanban/tasks', { title, columnId: column.id, order: tasks.length }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['board'] }); setNewTaskTitle(''); setIsAddingTask(false); }
+  });
+
+  const handleSaveTask = () => {
+    if (newTaskTitle.trim()) createTaskMutation.mutate(newTaskTitle.trim());
+    else setIsAddingTask(false);
+  };
+
+  const style = { opacity: isDragging ? 0.4 : 1 };
+
+  return (
+    <div ref={setNodeRef} style={style} className="bg-slate-100/80 backdrop-blur-sm w-80 shrink-0 rounded-2xl flex flex-col h-full border border-slate-200/60 shadow-sm overflow-hidden">
+      <div className="p-4 border-b border-slate-200/60 bg-slate-100/50 flex justify-between items-center cursor-default sticky top-0 z-10">
+        <h3 className="font-bold text-slate-700 tracking-tight leading-none text-[15px]">{column.title}</h3>
+        <span className="bg-white text-slate-500 text-[11px] font-bold px-2 py-0.5 rounded-full shadow-sm border border-slate-200">{tasks.length}</span>
+      </div>
+      
+      <div className="p-3 flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-300 min-h-[150px]">
+        <SortableContext items={tasks.map(t => t.id)} strategy={verticalListSortingStrategy}>
+          <div className="flex flex-col gap-0 pb-2">
+            {tasks.map((task) => (
+              <TaskCard key={task.id} task={task} isRestricted={isRestricted} userId={userId} />
+            ))}
+          </div>
+        </SortableContext>
+        
+        {!isRestricted && (
+          <div className="mt-1">
+            {isAddingTask ? (
+              <div className="bg-white p-3 rounded-xl border border-blue-400 shadow-md transform transition-all">
+                <textarea autoFocus value={newTaskTitle} onChange={(e) => setNewTaskTitle(e.target.value)} onBlur={handleSaveTask} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSaveTask(); } if (e.key === 'Escape') setIsAddingTask(false); }} placeholder="O que precisa ser feito?" className="w-full text-sm font-medium text-slate-800 bg-transparent outline-none resize-none overflow-hidden leading-snug placeholder:text-slate-400 placeholder:font-normal" rows={2} />
+              </div>
+            ) : (
+              <button onClick={() => setIsAddingTask(true)} className="w-full flex items-center gap-2 py-2.5 px-3 text-sm font-semibold text-slate-500 hover:text-blue-600 hover:bg-white rounded-xl transition-all border border-transparent hover:border-blue-200 hover:shadow-sm">
+                <Plus size={16} /> Adicionar Cartão
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+EOF
+
+echo "🎨 4. Frontend: Desativando fisicamente o Drag&Drop e travando edição (Cartão/Modal)..."
+cat << 'EOF' > apps/web/src/components/board/TaskCard.tsx
+import { useState, useEffect } from 'react';
+import { useParams } from 'next/navigation';
+import { useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { GripVertical, Trash2, Maximize2, AlignLeft, Calendar, Flag, Lock } from 'lucide-react';
+import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
+import { TaskModal } from './TaskModal';
+
+export function TaskCard({ task, isOverlay, isRestricted, userId }: { task: any, isOverlay?: boolean, isRestricted?: boolean, userId?: string }) {
+  const queryClient = useQueryClient();
+  const params = useParams();
+  const boardId = params?.id as string;
+  
+  const [isEditing, setIsEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState(task.title);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
+  useEffect(() => { setEditTitle(task.title); }, [task.title]);
+
+  const { data } = useQuery({ queryKey: ['boardMembers', boardId], enabled: !!boardId });
+  const membersData = data as any;
+  
+  // 🔥 A LÓGICA DE AÇO DO FRONTEND:
+  const canEdit = !isRestricted || task.assignedTo === userId;
+
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ 
+    id: task.id, 
+    data: { type: 'Task', task },
+    disabled: !canEdit // 🔒 DESATIVA A ALÇA SE ELE FOR RESTRITO E A TAREFA NÃO FOR DELE!
+  });
+
+  let assignee = null;
+  if (task.assignedTo && membersData) {
+    if (membersData.owner?.id === task.assignedTo) assignee = membersData.owner;
+    else assignee = membersData.members?.find((m: any) => m.id === task.assignedTo);
+  }
+
+  const updateTaskMutation = useMutation({
+    mutationFn: async (newTitle: string) => await api.patch(`/kanban/tasks/${task.id}`, { title: newTitle }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board'] }),
+  });
+
+  const deleteTaskMutation = useMutation({
+    mutationFn: async () => await api.delete(`/kanban/tasks/${task.id}`),
+    onSuccess: () => { toast.success('Tarefa excluída!'); queryClient.invalidateQueries({ queryKey: ['board'] }); },
+    onError: (err: any) => toast.error(err.response?.data?.message || 'Erro ao excluir.')
+  });
+
+  const handleSave = () => {
+    setIsEditing(false);
+    if (editTitle.trim() && editTitle.trim() !== task.title) updateTaskMutation.mutate(editTitle.trim());
+    else setEditTitle(task.title);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave(); }
+    if (e.key === 'Escape') { setIsEditing(false); setEditTitle(task.title); }
+  };
+
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging && !isOverlay ? 0.3 : 1 };
+  const isOverdue = task.dueDate && new Date(task.dueDate) < new Date(new Date().setHours(0,0,0,0));
+  const priorityColors: Record<string, string> = { HIGH: 'bg-red-50 text-red-600 border-red-200', MEDIUM: 'bg-amber-50 text-amber-600 border-amber-200', LOW: 'bg-blue-50 text-blue-600 border-blue-200' };
+  const priorityLabels: Record<string, string> = { HIGH: 'Alta', MEDIUM: 'Média', LOW: 'Baixa' };
+
+  return (
+    <>
+      <div ref={setNodeRef} style={style} className={`group bg-white p-3.5 rounded-xl shadow-sm border flex flex-col gap-2 relative transition-all ${isOverlay ? 'border-blue-500 shadow-xl rotate-2 scale-105 z-40' : 'border-slate-200 hover:border-blue-400 hover:shadow-md mb-3'} ${!canEdit && !isOverlay ? 'bg-slate-50/70' : ''}`}>
+        <div className="flex items-start gap-2">
+          {canEdit ? (
+            <div {...attributes} {...listeners} className="mt-0.5 text-slate-300 hover:text-blue-500 cursor-grab active:cursor-grabbing outline-none touch-none shrink-0"><GripVertical size={16} /></div>
+          ) : (
+            <div className="mt-0.5 text-slate-300 cursor-not-allowed shrink-0" title="Acesso Restrito"><Lock size={14} /></div>
+          )}
+          
+          <div className="flex-1 pr-12">
+            {isEditing && !isOverlay && canEdit ? (
+              <textarea autoFocus value={editTitle} onChange={(e) => setEditTitle(e.target.value)} onBlur={handleSave} onKeyDown={handleKeyDown} onPointerDown={(e) => e.stopPropagation()} className="w-full text-sm font-medium text-slate-800 bg-blue-50 border border-blue-400 rounded px-1 -mx-1 outline-none resize-none overflow-hidden leading-snug" rows={1} onInput={(e) => { const target = e.target as HTMLTextAreaElement; target.style.height = 'auto'; target.style.height = `${target.scrollHeight}px`; }} />
+            ) : (
+              <p onClick={() => !isOverlay && canEdit && setIsEditing(true)} className={`text-sm font-medium text-slate-800 leading-snug break-words whitespace-pre-wrap min-h-[20px] ${canEdit ? 'cursor-text hover:bg-slate-50 rounded px-1 -mx-1 transition-colors' : 'cursor-default'}`}>{task.title}</p>
+            )}
+          </div>
+          
+          {!isOverlay && !isEditing && (
+            <div className="absolute right-2 top-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 pl-2">
+              <button onClick={(e) => { e.stopPropagation(); setIsModalOpen(true); }} className="text-slate-400 hover:text-blue-600 hover:bg-blue-50 p-1.5 rounded-md transition-colors border border-transparent hover:border-blue-100" title={canEdit ? "Editar" : "Ver Detalhes"}><Maximize2 size={14} /></button>
+              {!isRestricted && (
+                <button onClick={(e) => { e.stopPropagation(); if (confirm('Excluir esta tarefa?')) deleteTaskMutation.mutate(); }} className="text-slate-400 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-md transition-colors border border-transparent hover:border-red-100" title="Excluir"><Trash2 size={14} /></button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {(task.description || task.dueDate || (task.priority && task.priority !== 'MEDIUM') || assignee) && (
+          <div className="flex items-end justify-between mt-1 pl-6 min-h-[24px]">
+            <div className="flex flex-wrap items-center gap-2">
+              {task.priority && task.priority !== 'MEDIUM' && (
+                <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md border ${priorityColors[task.priority]}`}><Flag size={10} /> {priorityLabels[task.priority]}</div>
+              )}
+              {task.description && <div className="text-slate-400 bg-slate-50 p-1 rounded-md border border-slate-100"><AlignLeft size={12} /></div>}
+              {task.dueDate && <div className={`flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-md border ${isOverdue ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-50 text-slate-500 border-slate-200'}`}><Calendar size={12} /> {new Date(task.dueDate).toLocaleDateString('pt-BR', { timeZone: 'UTC', day: '2-digit', month: 'short' })}</div>}
+            </div>
+            {assignee && <div className="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-[10px] uppercase ring-2 ring-white shadow-sm shrink-0 ml-auto" title={`Responsável: ${assignee.name}`}>{assignee.name.substring(0, 2)}</div>}
+          </div>
+        )}
+      </div>
+
+      {isModalOpen && !isOverlay && <TaskModal task={task} canEdit={canEdit} onClose={() => setIsModalOpen(false)} />}
+    </>
+  );
+}
+EOF
+
+cat << 'EOF' > apps/web/src/components/board/TaskModal.tsx
+import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { useParams } from 'next/navigation';
+import { X, Calendar, AlignLeft, Flag, User, ShieldAlert } from 'lucide-react';
+import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
+
+export function TaskModal({ task, canEdit, onClose }: { task: any, canEdit: boolean, onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const params = useParams();
+  const boardId = params?.id as string;
+  const { data } = useQuery({ queryKey: ['boardMembers', boardId], enabled: !!boardId });
+  const membersData = data as any;
+
+  const [description, setDescription] = useState(task.description || '');
+  const [priority, setPriority] = useState(task.priority || 'MEDIUM');
+  const [assignedTo, setAssignedTo] = useState(task.assignedTo || '');
+  const formatDateForInput = (dateStr: string) => { if (!dateStr) return ''; try { return new Date(dateStr).toISOString().split('T')[0]; } catch { return ''; } };
+  const [startDate, setStartDate] = useState(formatDateForInput(task.startDate));
+  const [dueDate, setDueDate] = useState(formatDateForInput(task.dueDate));
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+
+  const updateMutation = useMutation({
+    mutationFn: async () => { await api.patch(`/kanban/tasks/${task.id}`, { description, priority, assignedTo: assignedTo || null, startDate: startDate || null, dueDate: dueDate || null }); },
+    onSuccess: () => { toast.success('Salvo com sucesso!'); queryClient.invalidateQueries({ queryKey: ['board'] }); onClose(); },
+    onError: (err: any) => toast.error(err.response?.data?.message || 'Erro ao salvar.')
+  });
+
+  if (!mounted) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
+      <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity" onClick={onClose}></div>
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200">
+        <div className="flex items-center justify-between p-5 border-b border-slate-100 bg-slate-50/50 rounded-t-2xl">
+          <h2 className="text-xl font-bold text-slate-800 break-words pr-4 leading-snug">{task.title}</h2>
+          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-full transition-colors shrink-0"><X size={20} /></button>
+        </div>
+        
+        <div className="p-6 overflow-y-auto flex-1 space-y-8 scrollbar-thin">
+          {!canEdit && (
+            <div className="bg-orange-50 border border-orange-200 text-orange-800 p-3 rounded-xl text-sm font-medium flex gap-3">
+              <ShieldAlert size={20} className="shrink-0 text-orange-500 mt-0.5"/> 
+              Modo Somente Leitura! Você está acessando como Operador Restrito. Apenas o Responsável designado ou o Admin do projeto podem alterar os dados desta tarefa.
+            </div>
+          )}
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm font-semibold text-slate-700"><User size={16} className="text-indigo-500"/> Responsável</label>
+              <select disabled={!canEdit} value={assignedTo} onChange={(e) => setAssignedTo(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm outline-none bg-slate-50 text-slate-700 disabled:opacity-70 disabled:cursor-not-allowed font-medium">
+                <option value="">👤 Ninguém atribuído</option>
+                {membersData?.owner && <option value={membersData.owner.id}>👑 {membersData.owner.name} (Admin)</option>}
+                {membersData?.members?.map((m: any) => <option key={m.id} value={m.id}>✔️ {m.name}</option>)}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm font-semibold text-slate-700"><Flag size={16} className="text-blue-500"/> Prioridade</label>
+              <select disabled={!canEdit} value={priority} onChange={(e) => setPriority(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm outline-none bg-slate-50 disabled:opacity-70 disabled:cursor-not-allowed text-slate-700 font-medium">
+                <option value="LOW">Baixa</option><option value="MEDIUM">Média</option><option value="HIGH">Alta 🔥</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm font-semibold text-slate-700"><Calendar size={16} className="text-emerald-500"/> Início</label>
+              <input disabled={!canEdit} type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-slate-50 disabled:opacity-70 text-slate-700 font-medium" />
+            </div>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm font-semibold text-slate-700"><Calendar size={16} className="text-red-500"/> Prazo Final</label>
+              <input disabled={!canEdit} type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-slate-50 disabled:opacity-70 text-slate-700 font-medium" />
+            </div>
+          </div>
+          <div className="space-y-3 pt-2 border-t border-slate-100">
+            <label className="flex items-center gap-2 text-sm font-semibold text-slate-700"><AlignLeft size={16} className="text-purple-500"/> Descrição Detalhada</label>
+            <textarea disabled={!canEdit} value={description} onChange={(e) => setDescription(e.target.value)} className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm min-h-[150px] resize-y bg-slate-50 disabled:opacity-70 text-slate-700" />
+          </div>
+        </div>
+        
+        <div className="p-5 border-t border-slate-100 bg-slate-50 flex justify-end gap-3 rounded-b-2xl">
+          <button onClick={onClose} className="px-5 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-200 rounded-xl transition-colors">{canEdit ? 'Cancelar' : 'Fechar Visão'}</button>
+          {canEdit && (
+            <button onClick={() => updateMutation.mutate()} disabled={updateMutation.isPending} className="px-6 py-2.5 text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition-all shadow-md shadow-blue-600/20 disabled:opacity-50">
+              {updateMutation.isPending ? 'Salvando...' : 'Salvar Alterações'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+EOF
+
+echo "🚀 5. Recompilando o Ecossistema..."
+cd apps/api && pnpm run build
+cd ../web && pnpm run build
+cd ../..
+echo "✅=========================================================="
+echo "🎯 GOVERNANÇA ATIVADA! O MELHOR DOS MUNDOS ESTÁ NO AR."
+echo "✅=========================================================="

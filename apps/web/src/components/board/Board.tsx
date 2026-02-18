@@ -1,150 +1,235 @@
-'use client';
-
 import { useState, useEffect } from 'react';
-import { DndContext, DragOverlay, closestCorners, PointerSensor, useSensor, useSensors, DragStartEvent, DragOverEvent, DragEndEvent } from '@dnd-kit/core';
-import { arrayMove } from '@dnd-kit/sortable';
+import { DndContext, DragOverlay, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, defaultDropAnimationSideEffects } from '@dnd-kit/core';
+import { SortableContext, arrayMove, sortableKeyboardCoordinates, horizontalListSortingStrategy } from '@dnd-kit/sortable';
 import { Column } from './Column';
 import { TaskCard } from './TaskCard';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
-import { Plus } from 'lucide-react';
-import { io } from 'socket.io-client';
 import toast from 'react-hot-toast';
-
-export function calcPos(prevOrder?: number, nextOrder?: number): number {
-  if (prevOrder === undefined && nextOrder === undefined) return 1000;
-  if (prevOrder === undefined) return nextOrder! / 2;
-  if (nextOrder === undefined) return prevOrder! + 1000;
-  return (prevOrder + nextOrder) / 2;
-}
+import { socket } from '@/lib/socket';
 
 export function Board({ initialData }: { initialData: any }) {
-  const [board, setBoard] = useState(initialData);
-  const [activeTask, setActiveTask] = useState<any>(null);
   const queryClient = useQueryClient();
+  
+  const [columns, setColumns] = useState<any[]>(initialData?.columns || []);
+  
+  const [activeTask, setActiveTask] = useState<any>(null);
+  const [activeColumn, setActiveColumn] = useState<any>(null);
 
-  useEffect(() => { setBoard(initialData); }, [initialData]);
+  const { data: user } = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get('/me')).data.user });
+  const userId = user?.id;
+
+  const { data: boardData } = useQuery({
+    queryKey: ['board', initialData.id],
+    queryFn: async () => (await api.get(`/kanban/board/${initialData.id}`)).data,
+    initialData: initialData,
+  });
+
+  const isRestricted = boardData?.userRole === 'RESTRICTED';
+
+  useEffect(() => { if (boardData?.columns) setColumns(boardData.columns); }, [boardData]);
 
   useEffect(() => {
-    const socket = io('http://localhost:3001', { withCredentials: true, transports: ['websocket'] });
-    socket.on('boardUpdated', () => queryClient.invalidateQueries({ queryKey: ['board', board.id] }));
-    return () => { socket.disconnect(); };
-  }, [board.id, queryClient]);
+    socket.connect();
+    socket.on('boardUpdated', (data) => { if (data.boardId === initialData.id) queryClient.invalidateQueries({ queryKey: ['board', initialData.id] }); });
+    return () => { socket.off('boardUpdated'); };
+  }, [initialData.id, queryClient]);
 
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
-
-  const moveTaskMutation = useMutation({
-    mutationFn: async ({ taskId, data }: { taskId: string; data: any }) => {
-      await api.patch(`/kanban/tasks/${taskId}`, data);
-    },
-    onError: () => {
-      toast.error('Erro de conexão ao salvar movimento.');
-      queryClient.invalidateQueries({ queryKey: ['board', board.id] });
-    },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['board', board.id] })
+  const updateTaskPosition = useMutation({
+    mutationFn: async ({ taskId, columnId, order }: any) => await api.patch(`/kanban/tasks/${taskId}`, { columnId, order }),
+    onError: (err: any) => { toast.error(err.response?.data?.message || 'Acesso negado.'); queryClient.invalidateQueries({ queryKey: ['board', initialData.id] }); }
   });
 
-  const addColumnMutation = useMutation({
-    mutationFn: async (title: string) => {
-      const order = board.columns?.length > 0 ? board.columns[board.columns.length - 1].order + 1000 : 1000;
-      await api.post('/kanban/columns', { title, boardId: board.id, order });
-    },
-    onSuccess: () => {
-      toast.success('Lista criada com sucesso!');
-      queryClient.invalidateQueries({ queryKey: ['board', board.id] });
-    },
-    onError: () => toast.error('Falha ao criar nova lista.')
+  const updateColumnPosition = useMutation({
+    mutationFn: async ({ columnId, order }: any) => await api.patch(`/kanban/columns/${columnId}`, { order }),
+    onError: (err: any) => { toast.error(err.response?.data?.message || 'Erro ao mover lista.'); queryClient.invalidateQueries({ queryKey: ['board', initialData.id] }); }
   });
 
-  const handleDragStart = (e: DragStartEvent) => {
-    if (e.active.data.current?.type === 'Task') setActiveTask(e.active.data.current.task);
+  const createColumnMutation = useMutation({
+    mutationFn: async (title: string) => await api.post('/kanban/columns', { title, boardId: initialData.id, order: columns.length }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board', initialData.id] })
+  });
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), 
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
+
+  const handleDragStart = (event: any) => {
+    const { active } = event;
+    const type = active.data.current?.type;
+
+    if (type === 'Column') {
+      setActiveColumn(active.data.current.column);
+      return;
+    }
+    if (type === 'Task') {
+      const col = columns.find((c: any) => c.tasks.some((t: any) => t.id === active.id));
+      setActiveTask(col?.tasks.find((t: any) => t.id === active.id));
+      return;
+    }
   };
 
-  const handleDragOver = (e: DragOverEvent) => {
-    const { active, over } = e;
-    if (!over || active.id === over.id || active.data.current?.type !== 'Task') return;
+  const handleDragOver = (event: any) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
 
-    const isOverColumn = over.data.current?.type === 'Column';
+    const isActiveTask = active.data.current?.type === 'Task';
+    if (!isActiveTask) return;
 
-    setBoard((prev: any) => {
-      const activeColIndex = (prev.columns || []).findIndex((col: any) => (col.tasks || []).some((t: any) => t.id === active.id));
-      const overColIndex = isOverColumn 
-        ? (prev.columns || []).findIndex((col: any) => col.id === over.id)
-        : (prev.columns || []).findIndex((col: any) => (col.tasks || []).some((t: any) => t.id === over.id));
+    const activeId = active.id;
+    const overId = over.id;
 
-      if (activeColIndex === -1 || overColIndex === -1 || activeColIndex === overColIndex) return prev;
+    const activeColIndex = columns.findIndex((c: any) => c.tasks.some((t: any) => t.id === activeId));
+    let overColIndex = -1;
+    
+    if (over.data.current?.type === 'Task') {
+      overColIndex = columns.findIndex((c: any) => c.tasks.some((t: any) => t.id === overId));
+    } else if (over.data.current?.type === 'Column') {
+      overColIndex = columns.findIndex((c: any) => c.id === overId);
+    }
 
-      const newCols = [...prev.columns];
-      const taskObj = newCols[activeColIndex].tasks.find((t: any) => t.id === active.id);
+    if (activeColIndex === -1 || overColIndex === -1 || activeColIndex === overColIndex) return;
 
-      newCols[activeColIndex] = { ...newCols[activeColIndex], tasks: newCols[activeColIndex].tasks.filter((t: any) => t.id !== active.id) };
-      
-      const newOverTasks = [...newCols[overColIndex].tasks];
-      if (isOverColumn) {
-        newOverTasks.push({ ...taskObj, columnId: newCols[overColIndex].id });
-      } else {
-        const overTaskIndex = newOverTasks.findIndex((t: any) => t.id === over.id);
-        const modifier = (over && active.rect.current.translated && active.rect.current.translated.top > over.rect.top + over.rect.height) ? 1 : 0;
-        newOverTasks.splice(overTaskIndex + modifier, 0, { ...taskObj, columnId: newCols[overColIndex].id });
-      }
-      newCols[overColIndex] = { ...newCols[overColIndex], tasks: newOverTasks };
-      
-      return { ...prev, columns: newCols };
+    setColumns((prev: any[]) => {
+      const activeCol = prev[activeColIndex];
+      const overCol = prev[overColIndex];
+      const taskIndex = activeCol.tasks.findIndex((t: any) => t.id === activeId);
+      const task = activeCol.tasks[taskIndex];
+
+      return prev.map((c: any, i: number) => {
+        if (i === activeColIndex) return { ...c, tasks: c.tasks.filter((t: any) => t.id !== activeId) };
+        if (i === overColIndex) {
+          const overTaskIndex = over.data.current?.type === 'Task' ? overCol.tasks.findIndex((t: any) => t.id === overId) : overCol.tasks.length;
+          const newIndex = overTaskIndex >= 0 ? overTaskIndex : overCol.tasks.length;
+          const newTasks = [...overCol.tasks];
+          newTasks.splice(newIndex, 0, { ...task, columnId: overCol.id });
+          return { ...c, tasks: newTasks };
+        }
+        return c;
+      });
     });
   };
 
-  const handleDragEnd = (e: DragEndEvent) => {
+  const handleDragEnd = (event: any) => {
     setActiveTask(null);
-    const { active, over } = e;
+    setActiveColumn(null);
+    
+    const { active, over } = event;
     if (!over) return;
 
-    const activeCol = (board.columns || []).find((col: any) => (col.tasks || []).some((t: any) => t.id === active.id));
-    const overCol = (board.columns || []).find((col: any) => col.id === over.id) || (board.columns || []).find((col: any) => (col.tasks || []).some((t: any) => t.id === over.id));
+    const activeType = active.data.current?.type;
 
-    if (!activeCol || !overCol) return;
+    if (activeType === 'Column') {
+      const activeId = active.id;
+      const overId = over.id;
 
-    let finalTasks = [...overCol.tasks];
-    let newIndex = finalTasks.findIndex((t: any) => t.id === active.id);
+      const activeColIndex = columns.findIndex((c: any) => c.id === activeId);
+      const overColIndex = columns.findIndex((c: any) => c.id === overId);
 
-    if (activeCol.id === overCol.id) {
-       const oldIndex = finalTasks.findIndex((t: any) => t.id === active.id);
-       const overIndex = finalTasks.findIndex((t: any) => t.id === over.id);
-       if (oldIndex !== overIndex) {
-           finalTasks = arrayMove(finalTasks, oldIndex, overIndex);
-           newIndex = overIndex;
-           setBoard((prev: any) => ({
-             ...prev, columns: prev.columns.map((c: any) => c.id === overCol.id ? { ...c, tasks: finalTasks } : c)
-           }));
-       }
+      if (activeColIndex !== overColIndex && activeColIndex !== -1 && overColIndex !== -1) {
+        let newCols = arrayMove(columns, activeColIndex, overColIndex);
+        
+        let newOrder = 0;
+        const prevCol: any = newCols[overColIndex - 1];
+        const nextCol: any = newCols[overColIndex + 1];
+
+        if (prevCol && nextCol) newOrder = (prevCol.order + nextCol.order) / 2.0;
+        else if (prevCol) newOrder = prevCol.order + 1.0;
+        else if (nextCol) newOrder = nextCol.order / 2.0;
+        else newOrder = 1.0;
+
+        newCols[overColIndex] = { ...newCols[overColIndex], order: newOrder };
+        setColumns(newCols);
+        updateColumnPosition.mutate({ columnId: active.id, order: newOrder });
+      }
+      return;
     }
 
-    const targetTask = finalTasks[newIndex];
-    if (!targetTask) return;
+    if (activeType === 'Task') {
+      const activeId = active.id;
+      const overId = over.id;
 
-    const prevOrder = finalTasks[newIndex - 1]?.order;
-    const nextOrder = finalTasks[newIndex + 1]?.order;
-    const newOrder = calcPos(prevOrder, nextOrder);
-    
-    if (activeCol.id !== overCol.id || newOrder !== targetTask.order) {
-       moveTaskMutation.mutate({ taskId: active.id as string, data: { columnId: overCol.id, order: newOrder } });
+      const activeColIndex = columns.findIndex((c: any) => c.tasks.some((t: any) => t.id === activeId));
+      if (activeColIndex === -1) return;
+
+      const activeCol = columns[activeColIndex];
+      const taskIndex = activeCol.tasks.findIndex((t: any) => t.id === activeId);
+      const task = activeCol.tasks[taskIndex];
+
+      if (isRestricted && task.assignedTo !== userId) {
+        toast.error("Acesso Restrito: Apenas o responsável pode mover a tarefa.");
+        queryClient.invalidateQueries({ queryKey: ['board', initialData.id] });
+        return;
+      }
+
+      const overColIndex = columns.findIndex((c: any) => c.id === overId || c.tasks.some((t: any) => t.id === overId));
+      if (overColIndex === -1) return;
+      
+      const overCol = columns[overColIndex];
+      let overTaskIndex = overCol.tasks.findIndex((t: any) => t.id === overId);
+
+      let targetTasks = [...activeCol.tasks];
+      let finalIndex = taskIndex;
+
+      if (activeColIndex === overColIndex) {
+        if (overTaskIndex !== -1 && taskIndex !== overTaskIndex) {
+          finalIndex = overTaskIndex;
+          targetTasks = arrayMove(activeCol.tasks, taskIndex, overTaskIndex);
+        } else if (overId === overCol.id && taskIndex !== activeCol.tasks.length - 1) {
+          finalIndex = activeCol.tasks.length - 1; 
+          targetTasks = arrayMove(activeCol.tasks, taskIndex, finalIndex);
+        }
+      }
+
+      let newOrder = 0;
+      const prevTask: any = targetTasks[finalIndex - 1];
+      const nextTask: any = targetTasks[finalIndex + 1];
+
+      if (prevTask && nextTask) newOrder = (prevTask.order + nextTask.order) / 2.0; 
+      else if (prevTask) newOrder = prevTask.order + 1.0; 
+      else if (nextTask) newOrder = nextTask.order / 2.0; 
+      else newOrder = 1.0; 
+
+      setColumns((prev: any[]) => {
+        const newCols = [...prev];
+        newCols[activeColIndex].tasks = targetTasks;
+        newCols[activeColIndex].tasks[finalIndex] = { ...task, order: newOrder };
+        return newCols;
+      });
+
+      updateTaskPosition.mutate({ taskId: activeId, columnId: activeCol.id, order: newOrder });
     }
   };
 
+  const handleAddColumn = () => {
+    const title = prompt('Nome da nova etapa:');
+    if (title) createColumnMutation.mutate(title);
+  };
+
+  const dropAnimation = { sideEffects: defaultDropAnimationSideEffects({ styles: { active: { opacity: '0.4' } } }) };
+
   return (
-    <DndContext sensors={sensors} collisionDetection={closestCorners} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
-      <div className="flex gap-6 h-full items-start overflow-x-auto pb-4">
-        {(board.columns || []).map((col: any) => (
-          <Column key={col.id} column={col} boardId={board.id} />
-        ))}
-        <button 
-          onClick={() => { const t = prompt('Nome da Nova Lista:'); if(t && t.trim()) addColumnMutation.mutate(t); }}
-          className="shrink-0 w-80 bg-slate-200/50 hover:bg-white border-2 border-dashed border-slate-300 hover:border-blue-400 hover:text-blue-600 rounded-2xl flex items-center justify-center gap-2 text-slate-500 font-medium transition-all h-[100px]"
-        >
-          <Plus size={20} /> Criar Nova Lista
-        </button>
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
+      <div className="flex gap-6 h-full pb-4 items-start pt-2">
+        <SortableContext items={columns.map((c: any) => c.id)} strategy={horizontalListSortingStrategy}>
+          {columns.map((col: any) => (
+            <Column key={col.id} column={col} tasks={col.tasks} isRestricted={isRestricted} userId={userId as string} />
+          ))}
+        </SortableContext>
+        
+        {!isRestricted && (
+          <div className="w-80 shrink-0">
+            {/* 🔥 IDENTIDADE: O Botão Tracejado Burgundy */}
+            <button onClick={handleAddColumn} disabled={createColumnMutation.isPending} className="w-full flex items-center justify-center gap-2 py-4 border-2 border-dashed border-[#7A1D22]/40 rounded-2xl text-[#7A1D22] hover:bg-[#7A1D22]/5 transition-all font-semibold shadow-sm bg-transparent">
+              {createColumnMutation.isPending ? 'Criando...' : '+ Criar Nova Lista'}
+            </button>
+          </div>
+        )}
       </div>
-      <DragOverlay>
-        {activeTask ? <TaskCard task={activeTask} isOverlay /> : null}
+      <DragOverlay dropAnimation={dropAnimation}>
+        {activeTask ? <TaskCard task={activeTask} isRestricted={isRestricted} userId={userId as string} isOverlay /> : null}
+        {activeColumn ? <Column column={activeColumn} tasks={activeColumn.tasks} isRestricted={isRestricted} userId={userId as string} isOverlay /> : null}
       </DragOverlay>
     </DndContext>
   );

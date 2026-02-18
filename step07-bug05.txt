@@ -1,0 +1,51 @@
+#!/bin/bash
+set -e
+
+echo "🩹 Corrigindo o main.ts (Alinhando com o Prisma Schema real)..."
+
+cat << 'EOF' > apps/api/src/main.ts
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import { PrismaService } from './prisma/prisma.service';
+import * as bcrypt from 'bcryptjs';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  
+  // 1. Auto-criação do usuário usando o motor correto (bcryptjs)
+  const prisma = app.get(PrismaService);
+  const userExists = await prisma.user.findUnique({ where: { email: 'owner@kanban.com' } });
+  
+  if (!userExists) {
+    const hash = await bcrypt.hash('123456', 10);
+    // Usamos o nome exato da coluna que criamos no Step 02 (passwordHash)
+    await prisma.user.create({
+      data: { email: 'owner@kanban.com', name: 'Tech Lead Kanban', passwordHash: hash }
+    });
+    console.log('\n✅ CONTA MASTER CRIADA COM SUCESSO NO BANCO DE DADOS!\n');
+  }
+
+  // 2. Regras de Rede (Aceita tanto localhost quanto 127.0.0.1)
+  app.enableCors({
+    origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+    credentials: true,
+  });
+  
+  // 3. Truque elegante (require) para importar o leitor de cookies sem estressar o TypeScript
+  const cookieParser = require('cookie-parser');
+  app.use(cookieParser());
+  
+  await app.listen(3001, '0.0.0.0');
+}
+bootstrap();
+EOF
+
+echo "🏗️ Recompilando o Backend API..."
+cd apps/api
+pnpm run build
+cd ../..
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 CONSTRUÇÃO PERFEITA! O SISTEMA ESTÁ PRONTO."
+echo "✅=========================================================="

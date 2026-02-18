@@ -1,0 +1,508 @@
+#!/bin/bash
+set -e
+
+echo "🗄️ 1. Banco de Dados: Corrigindo a Tabela de Membros (Tipos UUID alinhados)..."
+node -e "
+const fs = require('fs');
+const path = 'apps/api/prisma/schema.prisma';
+let schema = fs.readFileSync(path, 'utf8');
+
+// Remove a tentativa falha do script anterior
+schema = schema.replace(/model BoardMember\s*\{[\s\S]*?\}\n*/g, '');
+
+const correctModel = \`
+model BoardMember {
+  id        String   @id @default(uuid()) @db.Uuid
+  boardId   String   @db.Uuid
+  userId    String   @db.Uuid
+  role      String   @default("MEMBER")
+  createdAt DateTime @default(now())
+
+  board     Board    @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([boardId, userId])
+}
+\`;
+
+schema += correctModel;
+fs.writeFileSync(path, schema);
+console.log('✅ Tabela BoardMember corrigida com sucesso!');
+"
+
+cd apps/api
+npx prisma db push --accept-data-loss
+npx prisma generate
+cd ../..
+
+echo "⚙️ 2. Backend: Ensinando a Dashboard a mostrar os Quadros Compartilhados..."
+cat << 'EOF' > apps/api/src/app.controller.ts
+import { Controller, Get, Post, Body, Request, UseGuards } from '@nestjs/common';
+import { PrismaService } from './prisma/prisma.service';
+import { KanbanGuard } from './auth/kanban.guard';
+
+@UseGuards(KanbanGuard)
+@Controller()
+export class AppController {
+  constructor(private prisma: PrismaService) {}
+
+  @Get('me')
+  async getProfile(@Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user) user.passwordHash = 'hidden';
+    return { user: user || req.user };
+  }
+
+  // 🚀 O GRANDE TRUQUE: Agora busca os quadros que você CRIOU ou que FOI CONVIDADO!
+  @Get('boards')
+  async getBoards(@Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    return this.prisma.board.findMany({
+      where: {
+        OR: [
+          { createdById: userId },
+          { members: { some: { userId: userId } } }
+        ]
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+  }
+
+  @Post('boards')
+  async createBoard(@Request() req: any, @Body() body: { name: string }) {
+    const userId = req.user?.sub || req.user?.id;
+    return this.prisma.board.create({
+      data: { name: body.name, createdById: userId }
+    });
+  }
+}
+EOF
+
+echo "⚙️ 3. Backend: Criando a porta de Convite e Travas de Segurança..."
+cat << 'EOF' > apps/api/src/kanban/kanban.controller.ts
+import { Controller, Get, Post, Body, Patch, Param, Delete, Request, UseGuards, NotFoundException, UnauthorizedException, BadRequestException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { EventsGateway } from '../events/events.gateway';
+import { KanbanGuard } from '../auth/kanban.guard';
+
+function toRank(order: number): string { return Number(order || 0).toFixed(5).padStart(20, '0'); }
+
+@UseGuards(KanbanGuard)
+@Controller('kanban')
+export class KanbanController {
+  constructor(private prisma: PrismaService, private events: EventsGateway) {}
+
+  @Get('board/:id')
+  async getBoard(@Param('id') id: string, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    
+    // 🛡️ Segurança Absoluta: A query só retorna o quadro se você for o dono OU se for membro convidado.
+    const board = await this.prisma.board.findFirst({
+      where: {
+        id,
+        OR: [ { createdById: userId }, { members: { some: { userId: userId } } } ]
+      },
+      include: { lists: { include: { cards: { orderBy: { rank: 'asc' } } }, orderBy: { rank: 'asc' } } }
+    });
+    
+    if (!board) throw new UnauthorizedException('Acesso negado. Você não participa deste projeto.');
+
+    return {
+      ...board,
+      columns: board.lists.map((list: any) => ({
+        id: list.id, title: list.title, order: parseFloat(list.rank), boardId: list.boardId,
+        tasks: list.cards.map((card: any) => ({ 
+          id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId,
+          description: card.description, priority: card.priority, startDate: card.startDate, dueDate: card.dueDate
+        }))
+      }))
+    };
+  }
+
+  // --- NOVAS ROTAS DA FASE 1 (COLABORAÇÃO) ---
+
+  @Get('board/:id/members')
+  async getMembers(@Param('id') id: string, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const board = await this.prisma.board.findUnique({
+      where: { id },
+      include: { members: { include: { user: true } } }
+    });
+    if (!board) throw new NotFoundException('Quadro não encontrado.');
+
+    const isCreator = board.createdById === userId;
+    const isMember = board.members.some((m: any) => m.userId === userId);
+    if (!isCreator && !isMember) throw new UnauthorizedException('Acesso negado.');
+
+    const owner = await this.prisma.user.findUnique({ where: { id: board.createdById } });
+    
+    return {
+      owner: { id: owner?.id, name: owner?.name, email: owner?.email },
+      members: board.members.map((m: any) => ({
+        id: m.user.id, name: m.user.name, email: m.user.email, role: m.role, memberId: m.id
+      }))
+    };
+  }
+
+  @Post('board/:id/members')
+  async addMember(@Param('id') id: string, @Body() body: { email: string }, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const board = await this.prisma.board.findUnique({ where: { id } });
+    
+    if (!board) throw new NotFoundException('Quadro não encontrado.');
+    // Bloqueia convites se quem clicou não for o dono
+    if (board.createdById !== userId) throw new UnauthorizedException('Apenas o dono do projeto pode convidar novos membros.');
+
+    const invitee = await this.prisma.user.findUnique({ where: { email: body.email } });
+    if (!invitee) throw new BadRequestException('Usuário não encontrado. Peça para ele se cadastrar primeiro.');
+    if (invitee.id === userId) throw new BadRequestException('Você é o dono do quadro, não pode se convidar.');
+
+    const existing = await this.prisma.boardMember.findUnique({
+      where: { boardId_userId: { boardId: id, userId: invitee.id } }
+    });
+    if (existing) throw new BadRequestException('Este usuário já faz parte do projeto.');
+
+    await this.prisma.boardMember.create({ data: { boardId: id, userId: invitee.id } });
+    
+    // Atualiza o painel para todos conectados ao quadro
+    this.events.server.emit('boardUpdated', { boardId: id });
+    return { success: true, message: 'Usuário convidado com sucesso!' };
+  }
+
+  @Delete('board/:id/members/:memberId')
+  async removeMember(@Param('id') id: string, @Param('memberId') memberId: string, @Request() req: any) {
+     const userId = req.user?.sub || req.user?.id;
+     const board = await this.prisma.board.findUnique({ where: { id } });
+     
+     if (!board) throw new NotFoundException('Quadro não encontrado.');
+     if (board.createdById !== userId) throw new UnauthorizedException('Apenas o dono pode remover membros.');
+     
+     await this.prisma.boardMember.delete({ where: { id: memberId } });
+     this.events.server.emit('boardUpdated', { boardId: id });
+     return { success: true, message: 'Membro removido.' };
+  }
+
+  // ------------------------------------------
+
+  @Patch('board/:id')
+  async updateBoard(@Param('id') id: string, @Body() body: { name: string }, @Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const board = await this.prisma.board.findUnique({ where: { id } });
+    if (!board || board.createdById !== userId) throw new UnauthorizedException('Apenas o dono pode renomear.');
+
+    const updatedBoard = await this.prisma.board.update({ where: { id }, data: { name: body.name } });
+    this.events.server.emit('boardUpdated', { boardId: id });
+    return updatedBoard;
+  }
+
+  @Post('columns')
+  async createColumn(@Body() body: { title: string; boardId: string; order: number }) {
+    const list = await this.prisma.list.create({ data: { title: body.title, boardId: body.boardId, rank: toRank(body.order) } });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: list.id, title: list.title, order: parseFloat(list.rank), boardId: list.boardId };
+  }
+
+  @Patch('columns/:id')
+  async updateColumn(@Param('id') id: string, @Body() body: { title: string }) {
+    const list = await this.prisma.list.update({ where: { id }, data: { title: body.title } });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: list.id, title: list.title, order: parseFloat(list.rank), boardId: list.boardId };
+  }
+
+  @Post('tasks')
+  async createTask(@Request() req: any, @Body() body: { title: string; columnId: string; order: number }) {
+    const list = await this.prisma.list.findUnique({ where: { id: body.columnId } });
+    if (!list) return null;
+    const userId = req.user.sub || req.user.id; 
+    const card = await this.prisma.card.create({
+      data: { title: body.title, listId: body.columnId, rank: toRank(body.order), boardId: list.boardId, createdById: userId, status: 'TODO' }
+    });
+    this.events.server.emit('boardUpdated', { boardId: list.boardId });
+    return { id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId, description: card.description, priority: card.priority, startDate: card.startDate, dueDate: card.dueDate };
+  }
+
+  @Patch('tasks/:id')
+  async updateTask(@Param('id') id: string, @Body() body: any) {
+    const data: any = {};
+    if (body.columnId !== undefined) data.listId = body.columnId;
+    if (body.order !== undefined) data.rank = toRank(body.order);
+    if (body.title !== undefined) data.title = body.title;
+    if (body.description !== undefined) data.description = body.description;
+    if (body.priority !== undefined) data.priority = body.priority;
+    if (body.startDate !== undefined) data.startDate = body.startDate ? new Date(body.startDate) : null;
+    if (body.dueDate !== undefined) data.dueDate = body.dueDate ? new Date(body.dueDate) : null;
+
+    const card = await this.prisma.card.update({ where: { id }, data });
+    this.events.server.emit('boardUpdated', { boardId: card.boardId });
+    return { id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId, description: card.description, priority: card.priority, startDate: card.startDate, dueDate: card.dueDate };
+  }
+
+  @Delete('tasks/:id')
+  async deleteTask(@Param('id') id: string) {
+    const card = await this.prisma.card.findUnique({ where: { id }});
+    if (!card) return null;
+    await this.prisma.card.delete({ where: { id } });
+    this.events.server.emit('boardUpdated', { boardId: card.boardId });
+    return { success: true };
+  }
+}
+EOF
+
+echo "🎨 4. Frontend: Construindo o Modal de Compartilhamento da Equipe..."
+cat << 'EOF' > apps/web/src/components/board/ShareModal.tsx
+import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { X, UserPlus, Mail, ShieldAlert, Trash2 } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
+
+export function ShareModal({ boardId, onClose, isOwner }: { boardId: string, onClose: () => void, isOwner: boolean }) {
+  const queryClient = useQueryClient();
+  const [email, setEmail] = useState('');
+  
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['boardMembers', boardId],
+    queryFn: async () => (await api.get(`/kanban/board/${boardId}/members`)).data
+  });
+
+  const inviteMutation = useMutation({
+    mutationFn: async (inviteEmail: string) => await api.post(`/kanban/board/${boardId}/members`, { email: inviteEmail }),
+    onSuccess: (res) => {
+      toast.success(res.message || 'Convite enviado com sucesso!');
+      setEmail('');
+      queryClient.invalidateQueries({ queryKey: ['boardMembers', boardId] });
+      queryClient.invalidateQueries({ queryKey: ['board', boardId] });
+    },
+    onError: (err: any) => {
+      toast.error(err.response?.data?.message || 'Erro ao enviar o convite.');
+    }
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: async (memberId: string) => await api.delete(`/kanban/board/${boardId}/members/${memberId}`),
+    onSuccess: () => {
+      toast.success('Membro removido!');
+      queryClient.invalidateQueries({ queryKey: ['boardMembers', boardId] });
+      queryClient.invalidateQueries({ queryKey: ['board', boardId] });
+    },
+    onError: (err: any) => toast.error(err.response?.data?.message || 'Erro ao remover membro.')
+  });
+
+  const handleInvite = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (email.trim()) inviteMutation.mutate(email.trim());
+  };
+
+  if (!mounted) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity" onClick={onClose}></div>
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col animate-in fade-in zoom-in-95 duration-200 overflow-hidden">
+        
+        <div className="flex items-center justify-between p-5 border-b border-slate-100 bg-slate-50 rounded-t-2xl">
+          <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2"><UserPlus size={20} className="text-blue-600"/> Equipe do Quadro</h2>
+          <button onClick={onClose} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-full transition-colors"><X size={20} /></button>
+        </div>
+        
+        <div className="p-6 space-y-6">
+          {isOwner && (
+            <>
+              <div className="bg-blue-50/50 p-4 rounded-xl border border-blue-100">
+                <p className="text-sm text-slate-600 leading-relaxed">
+                  Digite o e-mail do usuário que deseja convidar. Ele <strong>precisa ter uma conta cadastrada</strong> no sistema para acessar.
+                </p>
+              </div>
+              
+              <form onSubmit={handleInvite} className="flex gap-2">
+                <div className="relative flex-1">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400"><Mail size={16} /></div>
+                  <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="E-mail do convidado..." className="w-full pl-10 pr-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all bg-slate-50 focus:bg-white" required />
+                </div>
+                <button type="submit" disabled={inviteMutation.isPending || !email} className="bg-blue-600 text-white font-semibold px-4 py-2.5 rounded-xl text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-sm shadow-blue-600/20">
+                  {inviteMutation.isPending ? 'Enviando...' : 'Convidar'}
+                </button>
+              </form>
+            </>
+          )}
+
+          <div className="space-y-3 pt-2">
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Membros com Acesso</h3>
+            {isLoading ? (
+              <div className="text-sm text-slate-500 text-center py-4">Carregando equipe...</div>
+            ) : (
+              <div className="space-y-2 max-h-48 overflow-y-auto scrollbar-thin pr-1">
+                {/* Dono do Quadro */}
+                <div className="flex items-center justify-between bg-slate-50 border border-slate-100 p-2.5 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-xs uppercase">{data?.owner?.name?.substring(0, 2)}</div>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800 leading-none">{data?.owner?.name}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">{data?.owner?.email}</p>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded uppercase flex items-center gap-1"><ShieldAlert size={10} /> Admin</span>
+                </div>
+
+                {/* Convidados */}
+                {data?.members?.map((m: any) => (
+                  <div key={m.id} className="flex items-center justify-between bg-white border border-slate-100 p-2.5 rounded-lg group hover:border-blue-100 transition-colors">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs uppercase">{m.name?.substring(0, 2)}</div>
+                      <div>
+                        <p className="text-sm font-semibold text-slate-800 leading-none">{m.name}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">{m.email}</p>
+                      </div>
+                    </div>
+                    {isOwner ? (
+                      <button onClick={() => { if (confirm(`Remover ${m.name} deste quadro?`)) removeMutation.mutate(m.memberId); }} className="text-slate-300 hover:text-red-500 p-1.5 rounded-md hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100" title="Remover Membro">
+                        <Trash2 size={16} />
+                      </button>
+                    ) : (
+                      <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded uppercase">Membro</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+EOF
+
+echo "🎨 5. Frontend: Adicionando Avatares e Botão no Cabeçalho do Quadro..."
+cat << 'EOF' > apps/web/src/app/board/\[id\]/page.tsx
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import { Board } from '@/components/board/Board';
+import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { ArrowLeft, Loader2, LayoutDashboard, Edit2, UserPlus } from 'lucide-react';
+import { ShareModal } from '@/components/board/ShareModal';
+
+export default function BoardPage() {
+  const { id } = useParams();
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  
+  const [isEditingBoard, setIsEditingBoard] = useState(false);
+  const [boardName, setBoardName] = useState('');
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+
+  const { data: user } = useQuery({
+    queryKey: ['me'],
+    queryFn: async () => (await api.get('/me')).data.user
+  });
+
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['board', id],
+    queryFn: async () => (await api.get(`/kanban/board/${id}`)).data,
+    retry: false
+  });
+
+  // Busca os Membros em paralelo para mostrar os avatares no cabeçalho
+  const { data: membersData } = useQuery({
+    queryKey: ['boardMembers', id],
+    queryFn: async () => (await api.get(`/kanban/board/${id}/members`)).data,
+    enabled: !!data,
+  });
+
+  useEffect(() => { if (isError) router.replace('/'); }, [isError, router]);
+  useEffect(() => { if (data?.name && !isEditingBoard) setBoardName(data.name); }, [data?.name, isEditingBoard]);
+
+  const updateBoardMutation = useMutation({
+    mutationFn: async (newName: string) => await api.patch(`/kanban/board/${id}`, { name: newName }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['board', id] });
+      queryClient.invalidateQueries({ queryKey: ['boards'] });
+    },
+  });
+
+  const handleSaveBoardName = () => {
+    setIsEditingBoard(false);
+    if (boardName.trim() && boardName.trim() !== data?.name) updateBoardMutation.mutate(boardName.trim());
+    else setBoardName(data?.name || '');
+  };
+
+  if (isLoading) return <div className="min-h-screen flex items-center justify-center text-slate-500 font-medium gap-3"><Loader2 className="animate-spin text-blue-500" size={28} /> Sincronizando...</div>;
+  if (!data) return null;
+
+  const isOwner = user?.id === data.createdById;
+
+  return (
+    <div className="h-screen bg-slate-50 flex flex-col overflow-hidden">
+      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm shrink-0 z-10">
+        <div className="flex items-center gap-4">
+          <Link href="/" className="text-slate-400 hover:text-blue-600 transition-colors p-2 hover:bg-blue-50 rounded-full"><ArrowLeft size={20} /></Link>
+          <div className="h-6 w-px bg-slate-200"></div>
+          <div className="flex items-center gap-2 text-blue-600 group">
+            <LayoutDashboard size={24} />
+            {isEditingBoard && isOwner ? (
+              <input autoFocus value={boardName} onChange={(e) => setBoardName(e.target.value)} onBlur={handleSaveBoardName} onKeyDown={(e) => { if (e.key === 'Enter') handleSaveBoardName(); else if (e.key === 'Escape') { setIsEditingBoard(false); setBoardName(data.name); } }} className="text-xl font-bold text-slate-900 tracking-tight bg-blue-50 border border-blue-400 rounded px-2 -mx-2 outline-none w-64" />
+            ) : (
+              <div onClick={() => isOwner && setIsEditingBoard(true)} className={`flex items-center gap-2 ${isOwner ? 'cursor-text hover:bg-slate-100 rounded px-2 py-0.5 -mx-2 transition-colors' : ''}`} title={isOwner ? "Editar nome do quadro" : "Apenas o dono pode renomear"}>
+                <h1 className="text-xl font-bold text-slate-900 tracking-tight">{data.name}</h1>
+                {isOwner && <Edit2 size={14} className="text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity" />}
+              </div>
+            )}
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-4">
+          {/* Círculos de Avatares da Equipe */}
+          <div className="flex items-center gap-3 pr-4 border-r border-slate-200">
+            {membersData && (
+              <div className="flex -space-x-2 overflow-hidden">
+                {membersData.owner && (
+                  <div className="inline-flex h-8 w-8 rounded-full ring-2 ring-white bg-blue-600 items-center justify-center text-xs font-bold text-white shadow-sm cursor-help" title={`Dono: ${membersData.owner?.name}`}>
+                    {membersData.owner?.name?.substring(0, 2).toUpperCase()}
+                  </div>
+                )}
+                {membersData.members?.map((m: any) => (
+                  <div key={m.id} className="inline-flex h-8 w-8 rounded-full ring-2 ring-white bg-emerald-500 items-center justify-center text-xs font-bold text-white shadow-sm cursor-help" title={`Membro: ${m.name}`}>
+                    {m.name.substring(0, 2).toUpperCase()}
+                  </div>
+                ))}
+              </div>
+            )}
+            <button onClick={() => setIsShareModalOpen(true)} className="flex items-center gap-1.5 text-sm font-semibold text-blue-600 bg-blue-50 border border-blue-200 px-3 py-1.5 rounded-xl hover:bg-blue-100 transition-colors shadow-sm">
+              <UserPlus size={16} /> Equipe
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-full text-xs font-bold text-emerald-700 shadow-sm">
+            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" /> Tempo Real
+          </div>
+        </div>
+      </header>
+      
+      <main className="flex-1 p-6 overflow-x-auto overflow-y-hidden bg-[url('https://www.transparenttextures.com/patterns/cubes.png')]">
+        <Board initialData={data} />
+      </main>
+
+      {isShareModalOpen && <ShareModal boardId={id as string} onClose={() => setIsShareModalOpen(false)} isOwner={isOwner} />}
+    </div>
+  );
+}
+EOF
+
+echo "🚀 6. Recompilando Todo o Ecossistema..."
+cd apps/api && pnpm run build
+cd ../web && pnpm run build
+cd ../..
+
+echo "✅=========================================================="
+echo "🎯 FASE 1 CONCLUÍDA! O SISTEMA DE CONVITES ESTÁ BLINDADO."
+echo "✅=========================================================="

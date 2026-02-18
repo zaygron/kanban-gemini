@@ -1,0 +1,69 @@
+#!/bin/bash
+set -e
+
+echo "🚧 1. Substituindo o 'Mock' pelas rotas reais de Quadros no Backend..."
+
+cat << 'EOF' > apps/api/src/app.controller.ts
+import { Controller, Get, Post, Body, Request, UseGuards } from '@nestjs/common';
+import { PrismaService } from './prisma/prisma.service';
+import { KanbanGuard } from './auth/kanban.guard';
+
+// 🔒 Trancamos essa rota para que só usuários logados possam ver ou criar quadros
+@UseGuards(KanbanGuard)
+@Controller()
+export class AppController {
+  constructor(private prisma: PrismaService) {}
+
+  @Get('me')
+  async getProfile(@Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user) user.passwordHash = 'hidden'; // Omitindo o hash real por segurança
+    return { user: user || req.user };
+  }
+
+  // 1. Aposentamos o array provisório! Agora busca seus quadros reais.
+  @Get('boards')
+  async getBoards(@Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    return this.prisma.board.findMany({
+      where: {
+        OR: [
+          { createdById: userId },
+          { members: { some: { userId: userId } } }
+        ]
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+  }
+
+  // 2. A PORTA QUE FALTAVA (O erro 404 vai sumir):
+  // Cria o quadro no banco e já te coloca como Admin dele!
+  @Post('boards')
+  async createBoard(@Request() req: any, @Body() body: { name: string }) {
+    const userId = req.user?.sub || req.user?.id;
+    return this.prisma.board.create({
+      data: {
+        name: body.name,
+        createdById: userId,
+        members: {
+          create: {
+            userId: userId,
+            role: 'ADMIN'
+          }
+        }
+      }
+    });
+  }
+}
+EOF
+
+echo "🏗️ 2. Recompilando o Backend API..."
+cd apps/api
+pnpm run build
+cd ../..
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 ROTAS REAIS CRIADAS E INTEGRADAS COM SUCESSO!"
+echo "✅=========================================================="

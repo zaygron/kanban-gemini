@@ -1,0 +1,165 @@
+#!/bin/bash
+set -e
+
+echo "🔒 1. Backend: Trocando Cookies por Bearer Tokens (Imune ao Navegador)..."
+cat << 'EOF' > apps/api/src/auth/auth.controller.ts
+import { Controller, Post, Body, UnauthorizedException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { JwtService } from '@nestjs/jwt';
+import * as bcrypt from 'bcryptjs';
+
+@Controller('auth')
+export class AuthController {
+  constructor(private prisma: PrismaService, private jwtService: JwtService) {}
+
+  @Post('login')
+  async login(@Body() body: any) {
+    const user = await this.prisma.user.findUnique({ where: { email: body.email } });
+    if (!user) throw new UnauthorizedException('Credenciais inválidas');
+    const isMatch = await bcrypt.compare(body.password, user.passwordHash);
+    if (!isMatch) throw new UnauthorizedException('Credenciais inválidas');
+
+    const token = await this.jwtService.signAsync({ sub: user.id, email: user.email });
+    return { success: true, token, user: { id: user.id, name: user.name, email: user.email } };
+  }
+
+  @Post('logout')
+  async logout() {
+    return { success: true };
+  }
+}
+EOF
+
+cat << 'EOF' > apps/api/src/auth/kanban.guard.ts
+import { Injectable, CanActivate, ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+
+@Injectable()
+export class KanbanGuard implements CanActivate {
+  private jwtService = new JwtService({ secret: process.env.JWT_SECRET || 'super_secret_kanban_key_2026' });
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const request = context.switchToHttp().getRequest();
+    const authHeader = request.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+       throw new UnauthorizedException('Acesso negado: Token ausente.');
+    }
+
+    const token = authHeader.split(' ')[1];
+    try {
+      request.user = await this.jwtService.verifyAsync(token);
+      return true;
+    } catch {
+      throw new UnauthorizedException('Acesso negado: Sessão inválida ou expirada.');
+    }
+  }
+}
+EOF
+
+echo "🌐 2. Frontend: Ensinando o Axios a usar o Cofre do LocalStorage..."
+cat << 'EOF' > apps/web/src/lib/api.ts
+import axios from 'axios';
+
+const getBaseUrl = () => {
+  if (typeof window !== 'undefined') {
+    return window.location.origin.replace(':3000', ':3001');
+  }
+  return 'http://localhost:3001';
+};
+
+export const api = axios.create({ baseURL: getBaseUrl() });
+
+api.interceptors.request.use((config) => {
+  if (typeof window !== 'undefined') {
+    const token = localStorage.getItem('kanban_token');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+  }
+  return config;
+});
+EOF
+
+echo "🔑 3. Frontend: Atualizando o fluxo de Login e Logout..."
+cat << 'EOF' > apps/web/src/app/login/page.tsx
+'use client';
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import { LoginRequestSchema } from '@kanban/shared';
+
+export default function LoginPage() {
+  const [email, setEmail] = useState('owner@kanban.com');
+  const [password, setPassword] = useState('123456');
+  const [error, setError] = useState('');
+  const router = useRouter();
+  const queryClient = useQueryClient();
+
+  const loginMutation = useMutation({
+    mutationFn: async () => {
+      const validData = LoginRequestSchema.parse({ email, password });
+      const { data } = await api.post('/auth/login', validData);
+      return data;
+    },
+    onSuccess: (data) => {
+      // O Grande Truque: Guardamos o token no LocalStorage (O navegador não apaga!)
+      localStorage.setItem('kanban_token', data.token);
+      queryClient.invalidateQueries({ queryKey: ['me'] });
+      router.push('/');
+    },
+    onError: () => setError('Credenciais inválidas. Verifique e tente novamente.'),
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    loginMutation.mutate();
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-slate-100">
+      <div className="max-w-md w-full p-8 bg-white rounded-xl shadow-lg border border-slate-200">
+        <h2 className="text-3xl font-bold text-center text-slate-900 mb-8">Kanban v2</h2>
+        {error && <div className="mb-4 p-3 bg-red-50 text-red-600 rounded-lg text-sm font-medium text-center">{error}</div>}
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">E-mail</label>
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition" required />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Senha</label>
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition" required />
+          </div>
+          <button type="submit" disabled={loginMutation.isPending} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg transition-colors disabled:opacity-50">
+            {loginMutation.isPending ? 'Autenticando...' : 'Entrar'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+EOF
+
+node -e "
+const fs = require('fs');
+const dashPath = 'apps/web/src/app/page.tsx';
+if (fs.existsSync(dashPath)) {
+  let code = fs.readFileSync(dashPath, 'utf8');
+  code = code.replace(
+    /await api\.post\('[\/]auth[\/]logout'\);/g,
+    \"localStorage.removeItem('kanban_token');\"
+  );
+  fs.writeFileSync(dashPath, code);
+}
+"
+
+echo "🚀 4. Recompilando Todo o Ecossistema com a Nova Arquitetura..."
+cd apps/api && pnpm run build
+cd ../web && pnpm run build
+cd ../..
+
+echo "✅=========================================================="
+echo "🎯 ARQUITETURA BLINDADA! CÓDIGO À PROVA DE NAVEGADORES."
+echo "✅=========================================================="

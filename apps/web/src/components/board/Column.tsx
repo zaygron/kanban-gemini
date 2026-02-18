@@ -1,56 +1,111 @@
-import { useDroppable } from '@dnd-kit/core';
+import { useState, useEffect } from 'react';
+import { useSortable } from '@dnd-kit/sortable';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { TaskCard } from './TaskCard';
-import { useState } from 'react';
-import { Plus } from 'lucide-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { Plus, GripHorizontal } from 'lucide-react';
 import toast from 'react-hot-toast';
 
-export function Column({ column, boardId }: { column: any, boardId: string }) {
-  const { setNodeRef } = useDroppable({ id: column.id, data: { type: 'Column', column } });
-  const [isAdding, setIsAdding] = useState(false);
-  const [title, setTitle] = useState('');
+export function Column({ column, tasks, isRestricted, userId, isOverlay }: { column: any, tasks: any[], isRestricted: boolean, userId: string, isOverlay?: boolean }) {
   const queryClient = useQueryClient();
+  
+  const { setNodeRef, setActivatorNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ 
+    id: column.id, 
+    data: { type: 'Column', column },
+    disabled: isRestricted
+  });
+  
+  const [isAddingTask, setIsAddingTask] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [editTitle, setEditTitle] = useState(column.title);
 
-  const addTaskMutation = useMutation({
-    mutationFn: async (t: string) => {
-      const order = column.tasks?.length > 0 ? column.tasks[column.tasks.length - 1].order + 1000 : 1000;
-      await api.post('/kanban/tasks', { title: t, columnId: column.id, order });
-    },
-    onSuccess: () => { 
-      toast.success('Tarefa criada!');
-      queryClient.invalidateQueries({ queryKey: ['board', boardId] }); 
-      setIsAdding(false); 
-      setTitle(''); 
-    },
-    onError: () => toast.error('Falha ao criar tarefa.')
+  useEffect(() => { setEditTitle(column.title); }, [column.title]);
+
+  const createTaskMutation = useMutation({
+    mutationFn: async (title: string) => await api.post('/kanban/tasks', { title, columnId: column.id, order: tasks.length }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['board'] }); setNewTaskTitle(''); setIsAddingTask(false); }
   });
 
+  const updateColumnMutation = useMutation({
+    mutationFn: async (newTitle: string) => await api.patch(`/kanban/columns/${column.id}`, { title: newTitle }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board'] }),
+    onError: (err: any) => { toast.error(err.response?.data?.message || 'Erro ao renomear.'); setEditTitle(column.title); }
+  });
+
+  const handleSaveTask = () => { if (newTaskTitle.trim()) createTaskMutation.mutate(newTaskTitle.trim()); else setIsAddingTask(false); };
+
+  const handleSaveTitle = () => {
+    setIsEditingTitle(false);
+    if (editTitle.trim() && editTitle.trim() !== column.title) updateColumnMutation.mutate(editTitle.trim());
+    else setEditTitle(column.title);
+  };
+
+  const handleKeyDownTitle = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') { e.preventDefault(); handleSaveTitle(); }
+    if (e.key === 'Escape') { setIsEditingTitle(false); setEditTitle(column.title); }
+  };
+
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging && !isOverlay ? 0.3 : 1 };
+
   return (
-    <div className="bg-slate-100/90 rounded-2xl w-[320px] shrink-0 flex flex-col max-h-full border border-slate-200 shadow-sm">
-      <div className="p-4 flex items-center justify-between border-b border-slate-200/60 bg-slate-100/50 rounded-t-2xl">
-        <h3 className="font-semibold text-slate-800 tracking-tight">{column.title}</h3>
-        <span className="bg-white border border-slate-200 text-slate-600 text-xs px-2 py-0.5 rounded-full font-bold">{column.tasks?.length || 0}</span>
-      </div>
-      <div ref={setNodeRef} className="flex-1 overflow-y-auto p-3 min-h-[150px] scrollbar-thin">
-        <SortableContext items={(column.tasks || []).map((t: any) => t.id)} strategy={verticalListSortingStrategy}>
-          {(column.tasks || []).map((task: any) => (
-            <TaskCard key={task.id} task={task} />
-          ))}
-        </SortableContext>
-        {isAdding ? (
-          <form onSubmit={(e) => { e.preventDefault(); if (title.trim()) addTaskMutation.mutate(title); }} className="mt-1">
-            <input autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="O que será feito?" className="w-full text-sm px-3 py-2.5 border border-slate-300 shadow-sm rounded-xl outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all" />
-            <div className="flex gap-2 mt-2">
-              <button type="submit" disabled={addTaskMutation.isPending} className="bg-blue-600 text-white text-xs px-4 py-2 rounded-lg hover:bg-blue-700 font-medium transition-colors">Salvar</button>
-              <button type="button" onClick={() => setIsAdding(false)} className="text-slate-500 hover:text-slate-800 hover:bg-slate-200 text-xs px-3 py-2 rounded-lg font-medium transition-colors">Cancelar</button>
+    // 🔥 IDENTIDADE: Fundo da Coluna em "Stone/Areia"
+    <div ref={setNodeRef} style={style} className={`bg-[#EBE8E4] w-80 shrink-0 rounded-2xl flex flex-col h-full border overflow-hidden ${isOverlay ? 'border-[#7A1D22] shadow-2xl rotate-2 scale-105 z-50' : 'border-[#D6D2CF] shadow-sm'}`}>
+      
+      {/* 🔥 IDENTIDADE: Cabeçalho Vinho da Coluna com Contador Circulado */}
+      <div className="p-4 border-b border-[#5C1519] bg-[#7A1D22] flex justify-between items-start sticky top-0 z-10 min-h-[56px] group rounded-t-2xl">
+        <div className="flex-1 pr-2 flex items-start gap-1">
+          {!isRestricted && !isOverlay && (
+            <div ref={setActivatorNodeRef} {...attributes} {...listeners} className="mt-0.5 text-white/40 hover:text-white cursor-grab active:cursor-grabbing outline-none touch-none shrink-0 p-0.5 -ml-1.5 opacity-0 group-hover:opacity-100 transition-opacity" title="Arrastar Lista">
+              <GripHorizontal size={18} />
             </div>
-          </form>
+          )}
+
+          <div className="flex-1">
+            {isEditingTitle && !isRestricted && !isOverlay ? (
+              <input autoFocus value={editTitle} onChange={(e) => setEditTitle(e.target.value)} onBlur={handleSaveTitle} onKeyDown={handleKeyDownTitle} className="w-full text-[15px] font-bold text-[#7A1D22] tracking-tight leading-snug bg-white border border-transparent rounded px-1.5 py-0.5 -mx-1.5 outline-none shadow-sm" />
+            ) : (
+              <h3 onClick={() => !isRestricted && !isOverlay && setIsEditingTitle(true)} className={`font-bold text-white tracking-tight leading-snug text-[15px] break-words whitespace-pre-wrap ${!isRestricted ? 'cursor-text hover:bg-white/10 rounded px-1.5 py-0.5 -mx-1.5 transition-colors' : 'cursor-default'}`} title={!isRestricted ? "Clique para renomear" : ""}>
+                {column.title}
+              </h3>
+            )}
+          </div>
+        </div>
+        
+        <span className="bg-white text-[#7A1D22] text-[11px] font-bold px-2.5 py-0.5 rounded-full shadow-sm shrink-0 mt-0.5">{tasks.length}</span>
+      </div>
+      
+      <div className="p-3 flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-[#C8C4BF] min-h-[150px]">
+        {!isOverlay ? (
+          <SortableContext items={tasks.map((t: any) => t.id)} strategy={verticalListSortingStrategy}>
+            <div className="flex flex-col gap-0 pb-2">
+              {tasks.map((task: any) => (
+                <TaskCard key={task.id} task={task} isRestricted={isRestricted} userId={userId} />
+              ))}
+            </div>
+          </SortableContext>
         ) : (
-          <button onClick={() => setIsAdding(true)} className="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-800 w-full p-2.5 hover:bg-slate-200/70 border border-dashed border-transparent hover:border-slate-300 rounded-xl transition-all mt-1 font-medium">
-            <Plus size={18} /> Adicionar Cartão
-          </button>
+          <div className="flex flex-col gap-0 pb-2">
+            {tasks.map((task: any) => (
+              <TaskCard key={task.id} task={task} isRestricted={isRestricted} userId={userId} />
+            ))}
+          </div>
+        )}
+        
+        {!isRestricted && !isOverlay && (
+          <div className="mt-1">
+            {isAddingTask ? (
+              <div className="bg-white p-3 rounded-xl border border-[#7A1D22]/50 shadow-md transform transition-all">
+                <textarea autoFocus value={newTaskTitle} onChange={(e) => setNewTaskTitle(e.target.value)} onBlur={handleSaveTask} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSaveTask(); } if (e.key === 'Escape') setIsAddingTask(false); }} placeholder="O que precisa ser feito?" className="w-full text-sm font-medium text-stone-800 bg-transparent outline-none resize-none overflow-hidden leading-snug placeholder:text-stone-400 placeholder:font-normal" rows={2} />
+              </div>
+            ) : (
+              <button onClick={() => setIsAddingTask(true)} className="w-full flex items-center gap-2 py-2.5 px-3 text-sm font-semibold text-[#8C8782] hover:text-[#7A1D22] hover:bg-white/60 rounded-xl transition-all border border-transparent hover:border-[#7A1D22]/20 hover:shadow-sm">
+                <Plus size={16} /> Adicionar Cartão
+              </button>
+            )}
+          </div>
         )}
       </div>
     </div>

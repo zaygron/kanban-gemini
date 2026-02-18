@@ -1,0 +1,610 @@
+#!/bin/bash
+set -e
+
+echo "🎨 1. Frontend: Aplicando o Tema 'Corporate Burgundy' no Cabeçalho..."
+
+cat << 'EOF' > apps/web/src/app/board/\[id\]/page.tsx
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import { Board } from '@/components/board/Board';
+import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { ArrowLeft, Loader2, LayoutDashboard, Edit2, UserPlus, LogOut } from 'lucide-react';
+import { ShareModal } from '@/components/board/ShareModal';
+
+export default function BoardPage() {
+  const { id } = useParams();
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  
+  const [isEditingBoard, setIsEditingBoard] = useState(false);
+  const [boardName, setBoardName] = useState('');
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+
+  const { data: user } = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get('/me')).data.user });
+  const { data, isLoading, isError } = useQuery({ queryKey: ['board', id], queryFn: async () => (await api.get(`/kanban/board/${id}`)).data, retry: false });
+  const { data: membersData } = useQuery({ queryKey: ['boardMembers', id], queryFn: async () => (await api.get(`/kanban/board/${id}/members`)).data, enabled: !!data });
+
+  useEffect(() => { if (isError) router.replace('/'); }, [isError, router]);
+  useEffect(() => { if (data?.name && !isEditingBoard) setBoardName(data.name); }, [data?.name, isEditingBoard]);
+
+  const updateBoardMutation = useMutation({
+    mutationFn: async (newName: string) => await api.patch(`/kanban/board/${id}`, { name: newName }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['board', id] }); queryClient.invalidateQueries({ queryKey: ['boards'] }); },
+  });
+
+  const handleSaveBoardName = () => { setIsEditingBoard(false); if (boardName.trim() && boardName.trim() !== data?.name) updateBoardMutation.mutate(boardName.trim()); else setBoardName(data?.name || ''); };
+  const handleLogout = () => { localStorage.removeItem('kanban_token'); queryClient.clear(); router.replace('/login'); };
+
+  if (isLoading) return <div className="min-h-screen flex items-center justify-center text-stone-500 font-medium gap-3 bg-[#F4F1ED]"><Loader2 className="animate-spin text-[#7A1D22]" size={28} /> Sincronizando...</div>;
+  if (!data) return null;
+
+  const isOwner = user?.id === data.createdById;
+
+  return (
+    <div className="h-screen bg-[#F4F1ED] flex flex-col overflow-hidden">
+      {/* 🔥 IDENTIDADE: O Cabeçalho Vinho Profundo */}
+      <header className="bg-[#7A1D22] border-b border-[#5C1519] px-6 py-4 flex items-center justify-between shadow-md shrink-0 z-10">
+        <div className="flex items-center gap-4">
+          <Link href="/" className="text-white/70 hover:text-white transition-colors p-2 hover:bg-white/10 rounded-full"><ArrowLeft size={20} /></Link>
+          <div className="h-6 w-px bg-white/20"></div>
+          <div className="flex items-center gap-2 text-white group">
+            <LayoutDashboard size={24} className="opacity-90" />
+            {isEditingBoard && isOwner ? (
+              <input autoFocus value={boardName} onChange={(e) => setBoardName(e.target.value)} onBlur={handleSaveBoardName} onKeyDown={(e) => { if (e.key === 'Enter') handleSaveBoardName(); else if (e.key === 'Escape') { setIsEditingBoard(false); setBoardName(data.name); } }} className="text-xl font-bold text-[#7A1D22] tracking-tight bg-white border border-transparent rounded px-2 -mx-2 outline-none w-64 shadow-sm" />
+            ) : (
+              <div onClick={() => isOwner && setIsEditingBoard(true)} className={`flex items-center gap-2 ${isOwner ? 'cursor-text hover:bg-white/10 rounded px-2 py-0.5 -mx-2 transition-colors' : ''}`} title={isOwner ? "Editar nome do quadro" : "Apenas o dono pode renomear"}>
+                <h1 className="text-xl font-bold text-white tracking-tight">{data.name}</h1>
+                {isOwner && <Edit2 size={14} className="text-white/50 opacity-0 group-hover:opacity-100 transition-opacity" />}
+              </div>
+            )}
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-3 md:gap-4">
+          <div className="flex items-center gap-3 pr-3 md:pr-4 border-r border-white/20">
+            {membersData && (
+              <div className="flex -space-x-2 overflow-hidden">
+                {membersData.owner && (
+                  <div className="inline-flex h-8 w-8 rounded-full ring-2 ring-[#7A1D22] bg-[#3B82F6] items-center justify-center text-xs font-bold text-white shadow-sm cursor-help" title={`Dono: ${membersData.owner?.name}`}>
+                    {membersData.owner?.name?.substring(0, 2).toUpperCase()}
+                  </div>
+                )}
+                {membersData.members?.map((m: any) => (
+                  <div key={m.id} className="inline-flex h-8 w-8 rounded-full ring-2 ring-[#7A1D22] bg-[#10B981] items-center justify-center text-xs font-bold text-white shadow-sm cursor-help" title={`Membro: ${m.name}`}>
+                    {m.name.substring(0, 2).toUpperCase()}
+                  </div>
+                ))}
+              </div>
+            )}
+            <button onClick={() => setIsShareModalOpen(true)} className="flex items-center gap-1.5 text-sm font-semibold text-white bg-white/10 border border-white/20 px-3 py-1.5 rounded-xl hover:bg-white/20 transition-colors shadow-sm">
+              <UserPlus size={16} /> <span className="hidden sm:inline">Equipe</span>
+            </button>
+          </div>
+
+          <div className="items-center gap-2 bg-[#5C1519] border border-[#4A1114] px-3 py-1.5 rounded-full text-xs font-bold text-emerald-400 shadow-inner hidden md:flex">
+            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" /> Tempo Real
+          </div>
+
+          {user && (
+            <div className="pl-1 md:pl-2 flex items-center gap-3">
+              <div className="flex flex-col items-end">
+                <span className="text-[10px] font-bold text-white/50 uppercase leading-none">Logado</span>
+                <span className="text-sm font-bold text-white leading-tight">{user.name.split(' ')[0]}</span>
+              </div>
+              <button onClick={handleLogout} className="text-white/70 hover:text-white transition-colors bg-transparent p-2 rounded-lg hover:bg-white/10 border border-transparent hover:border-white/20" title="Sair do Sistema">
+                <LogOut size={16} />
+              </button>
+            </div>
+          )}
+        </div>
+      </header>
+      
+      {/* 🔥 IDENTIDADE: Fundo Bege Quente Liso (Sem Textura para parecer App Desktop) */}
+      <main className="flex-1 p-6 overflow-x-auto overflow-y-hidden bg-[#F4F1ED]">
+        <Board initialData={data} />
+      </main>
+
+      {isShareModalOpen && <ShareModal boardId={id as string} onClose={() => setIsShareModalOpen(false)} isOwner={isOwner} />}
+    </div>
+  );
+}
+EOF
+
+echo "🎨 2. Frontend: Aplicando Fundo Quente e Cabeçalho Bordô nas Colunas..."
+
+cat << 'EOF' > apps/web/src/components/board/Column.tsx
+import { useState, useEffect } from 'react';
+import { useSortable } from '@dnd-kit/sortable';
+import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { TaskCard } from './TaskCard';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import { Plus, GripHorizontal } from 'lucide-react';
+import toast from 'react-hot-toast';
+
+export function Column({ column, tasks, isRestricted, userId, isOverlay }: { column: any, tasks: any[], isRestricted: boolean, userId: string, isOverlay?: boolean }) {
+  const queryClient = useQueryClient();
+  
+  const { setNodeRef, setActivatorNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ 
+    id: column.id, 
+    data: { type: 'Column', column },
+    disabled: isRestricted
+  });
+  
+  const [isAddingTask, setIsAddingTask] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [editTitle, setEditTitle] = useState(column.title);
+
+  useEffect(() => { setEditTitle(column.title); }, [column.title]);
+
+  const createTaskMutation = useMutation({
+    mutationFn: async (title: string) => await api.post('/kanban/tasks', { title, columnId: column.id, order: tasks.length }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['board'] }); setNewTaskTitle(''); setIsAddingTask(false); }
+  });
+
+  const updateColumnMutation = useMutation({
+    mutationFn: async (newTitle: string) => await api.patch(`/kanban/columns/${column.id}`, { title: newTitle }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board'] }),
+    onError: (err: any) => { toast.error(err.response?.data?.message || 'Erro ao renomear.'); setEditTitle(column.title); }
+  });
+
+  const handleSaveTask = () => { if (newTaskTitle.trim()) createTaskMutation.mutate(newTaskTitle.trim()); else setIsAddingTask(false); };
+
+  const handleSaveTitle = () => {
+    setIsEditingTitle(false);
+    if (editTitle.trim() && editTitle.trim() !== column.title) updateColumnMutation.mutate(editTitle.trim());
+    else setEditTitle(column.title);
+  };
+
+  const handleKeyDownTitle = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') { e.preventDefault(); handleSaveTitle(); }
+    if (e.key === 'Escape') { setIsEditingTitle(false); setEditTitle(column.title); }
+  };
+
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging && !isOverlay ? 0.3 : 1 };
+
+  return (
+    // 🔥 IDENTIDADE: Fundo da Coluna em "Stone/Areia"
+    <div ref={setNodeRef} style={style} className={`bg-[#EBE8E4] w-80 shrink-0 rounded-2xl flex flex-col h-full border overflow-hidden ${isOverlay ? 'border-[#7A1D22] shadow-2xl rotate-2 scale-105 z-50' : 'border-[#D6D2CF] shadow-sm'}`}>
+      
+      {/* 🔥 IDENTIDADE: Cabeçalho Vinho da Coluna com Contador Circulado */}
+      <div className="p-4 border-b border-[#5C1519] bg-[#7A1D22] flex justify-between items-start sticky top-0 z-10 min-h-[56px] group rounded-t-2xl">
+        <div className="flex-1 pr-2 flex items-start gap-1">
+          {!isRestricted && !isOverlay && (
+            <div ref={setActivatorNodeRef} {...attributes} {...listeners} className="mt-0.5 text-white/40 hover:text-white cursor-grab active:cursor-grabbing outline-none touch-none shrink-0 p-0.5 -ml-1.5 opacity-0 group-hover:opacity-100 transition-opacity" title="Arrastar Lista">
+              <GripHorizontal size={18} />
+            </div>
+          )}
+
+          <div className="flex-1">
+            {isEditingTitle && !isRestricted && !isOverlay ? (
+              <input autoFocus value={editTitle} onChange={(e) => setEditTitle(e.target.value)} onBlur={handleSaveTitle} onKeyDown={handleKeyDownTitle} className="w-full text-[15px] font-bold text-[#7A1D22] tracking-tight leading-snug bg-white border border-transparent rounded px-1.5 py-0.5 -mx-1.5 outline-none shadow-sm" />
+            ) : (
+              <h3 onClick={() => !isRestricted && !isOverlay && setIsEditingTitle(true)} className={`font-bold text-white tracking-tight leading-snug text-[15px] break-words whitespace-pre-wrap ${!isRestricted ? 'cursor-text hover:bg-white/10 rounded px-1.5 py-0.5 -mx-1.5 transition-colors' : 'cursor-default'}`} title={!isRestricted ? "Clique para renomear" : ""}>
+                {column.title}
+              </h3>
+            )}
+          </div>
+        </div>
+        
+        <span className="bg-white text-[#7A1D22] text-[11px] font-bold px-2.5 py-0.5 rounded-full shadow-sm shrink-0 mt-0.5">{tasks.length}</span>
+      </div>
+      
+      <div className="p-3 flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-[#C8C4BF] min-h-[150px]">
+        {!isOverlay ? (
+          <SortableContext items={tasks.map((t: any) => t.id)} strategy={verticalListSortingStrategy}>
+            <div className="flex flex-col gap-0 pb-2">
+              {tasks.map((task: any) => (
+                <TaskCard key={task.id} task={task} isRestricted={isRestricted} userId={userId} />
+              ))}
+            </div>
+          </SortableContext>
+        ) : (
+          <div className="flex flex-col gap-0 pb-2">
+            {tasks.map((task: any) => (
+              <TaskCard key={task.id} task={task} isRestricted={isRestricted} userId={userId} />
+            ))}
+          </div>
+        )}
+        
+        {!isRestricted && !isOverlay && (
+          <div className="mt-1">
+            {isAddingTask ? (
+              <div className="bg-white p-3 rounded-xl border border-[#7A1D22]/50 shadow-md transform transition-all">
+                <textarea autoFocus value={newTaskTitle} onChange={(e) => setNewTaskTitle(e.target.value)} onBlur={handleSaveTask} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSaveTask(); } if (e.key === 'Escape') setIsAddingTask(false); }} placeholder="O que precisa ser feito?" className="w-full text-sm font-medium text-stone-800 bg-transparent outline-none resize-none overflow-hidden leading-snug placeholder:text-stone-400 placeholder:font-normal" rows={2} />
+              </div>
+            ) : (
+              <button onClick={() => setIsAddingTask(true)} className="w-full flex items-center gap-2 py-2.5 px-3 text-sm font-semibold text-[#8C8782] hover:text-[#7A1D22] hover:bg-white/60 rounded-xl transition-all border border-transparent hover:border-[#7A1D22]/20 hover:shadow-sm">
+                <Plus size={16} /> Adicionar Cartão
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+EOF
+
+echo "🎨 3. Frontend: Refinando as Tarefas e as Cores do Avatar..."
+
+cat << 'EOF' > apps/web/src/components/board/TaskCard.tsx
+import { useState, useEffect } from 'react';
+import { useParams } from 'next/navigation';
+import { useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { GripVertical, Trash2, Maximize2, AlignLeft, Calendar, Flag, Lock } from 'lucide-react';
+import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
+import { TaskModal } from './TaskModal';
+
+// 🔥 IDENTIDADE MÁGICA: Gerador de cor do Avatar baseado no nome do usuário
+const getAvatarColor = (name: string) => {
+  const colors = ['bg-[#5C3A58]', 'bg-[#3A5A81]', 'bg-[#537A5A]', 'bg-[#7A4B3A]', 'bg-[#2C3E50]'];
+  if (!name) return colors[0];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  return colors[Math.abs(hash) % colors.length];
+};
+
+export function TaskCard({ task, isOverlay, isRestricted, userId }: { task: any, isOverlay?: boolean, isRestricted?: boolean, userId?: string }) {
+  const queryClient = useQueryClient();
+  const params = useParams();
+  const boardId = params?.id as string;
+  
+  const [isEditing, setIsEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState(task.title);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
+  useEffect(() => { setEditTitle(task.title); }, [task.title]);
+
+  const { data } = useQuery({ queryKey: ['boardMembers', boardId], enabled: !!boardId });
+  const membersData = data as any;
+  
+  const canEdit = !isRestricted || task.assignedTo === userId;
+
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ 
+    id: task.id, 
+    data: { type: 'Task', task },
+    disabled: !canEdit 
+  });
+
+  let assignee = null;
+  if (task.assignedTo && membersData) {
+    if (membersData.owner?.id === task.assignedTo) assignee = membersData.owner;
+    else assignee = membersData.members?.find((m: any) => m.id === task.assignedTo);
+  }
+
+  const updateTaskMutation = useMutation({
+    mutationFn: async (newTitle: string) => await api.patch(`/kanban/tasks/${task.id}`, { title: newTitle }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board'] }),
+  });
+
+  const deleteTaskMutation = useMutation({
+    mutationFn: async () => await api.delete(`/kanban/tasks/${task.id}`),
+    onSuccess: () => { toast.success('Tarefa excluída!'); queryClient.invalidateQueries({ queryKey: ['board'] }); },
+    onError: (err: any) => toast.error(err.response?.data?.message || 'Erro ao excluir.')
+  });
+
+  const handleSave = () => {
+    setIsEditing(false);
+    if (editTitle.trim() && editTitle.trim() !== task.title) updateTaskMutation.mutate(editTitle.trim());
+    else setEditTitle(task.title);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave(); }
+    if (e.key === 'Escape') { setIsEditing(false); setEditTitle(task.title); }
+  };
+
+  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging && !isOverlay ? 0.3 : 1 };
+  const isOverdue = task.dueDate && new Date(task.dueDate) < new Date(new Date().setHours(0,0,0,0));
+  
+  // 🔥 IDENTIDADE: Cores de Etiquetas padronizadas
+  const priorityColors: Record<string, string> = { HIGH: 'bg-[#F4E3E4] text-[#7A1D22] border-[#E8C4C6]', MEDIUM: 'bg-amber-50 text-amber-700 border-amber-200', LOW: 'bg-stone-50 text-stone-600 border-stone-200' };
+  const priorityLabels: Record<string, string> = { HIGH: 'Alta', MEDIUM: 'Média', LOW: 'Baixa' };
+
+  return (
+    <>
+      <div ref={setNodeRef} style={style} className={`group bg-white p-3.5 rounded-xl shadow-sm border flex flex-col gap-2 relative transition-all ${isOverlay ? 'border-[#7A1D22] shadow-xl rotate-2 scale-105 z-40' : 'border-[#D6D2CF] hover:border-[#7A1D22]/50 hover:shadow-md mb-3'} ${!canEdit && !isOverlay ? 'bg-[#F4F1ED]/70' : ''}`}>
+        <div className="flex items-start gap-2">
+          {canEdit ? (
+            <div {...attributes} {...listeners} className="mt-0.5 text-[#C8C4BF] hover:text-[#7A1D22] cursor-grab active:cursor-grabbing outline-none touch-none shrink-0"><GripVertical size={16} /></div>
+          ) : (
+            <div className="mt-0.5 text-[#C8C4BF] cursor-not-allowed shrink-0" title="Acesso Restrito"><Lock size={14} /></div>
+          )}
+          
+          <div className="flex-1 pr-12">
+            {isEditing && !isOverlay && canEdit ? (
+              <textarea autoFocus value={editTitle} onChange={(e) => setEditTitle(e.target.value)} onBlur={handleSave} onKeyDown={handleKeyDown} onPointerDown={(e) => e.stopPropagation()} className="w-full text-sm font-medium text-stone-800 bg-[#7A1D22]/5 border border-[#7A1D22]/30 rounded px-1 -mx-1 outline-none resize-none overflow-hidden leading-snug" rows={1} onInput={(e) => { const target = e.target as HTMLTextAreaElement; target.style.height = 'auto'; target.style.height = `${target.scrollHeight}px`; }} />
+            ) : (
+              <p onClick={() => !isOverlay && canEdit && setIsEditing(true)} className={`text-[14px] font-medium text-[#4A4A4A] leading-snug break-words whitespace-pre-wrap min-h-[20px] ${canEdit ? 'cursor-text hover:bg-stone-50 rounded px-1 -mx-1 transition-colors' : 'cursor-default'}`}>{task.title}</p>
+            )}
+          </div>
+          
+          {!isOverlay && !isEditing && (
+            <div className="absolute right-2 top-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 pl-2">
+              <button onClick={(e) => { e.stopPropagation(); setIsModalOpen(true); }} className="text-[#A39E99] hover:text-[#7A1D22] hover:bg-[#7A1D22]/10 p-1.5 rounded-md transition-colors border border-transparent hover:border-[#7A1D22]/20" title={canEdit ? "Editar" : "Ver Detalhes"}><Maximize2 size={14} /></button>
+              {!isRestricted && (
+                <button onClick={(e) => { e.stopPropagation(); if (confirm('Excluir esta tarefa?')) deleteTaskMutation.mutate(); }} className="text-[#A39E99] hover:text-red-600 hover:bg-red-50 p-1.5 rounded-md transition-colors border border-transparent hover:border-red-100" title="Excluir"><Trash2 size={14} /></button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {(task.description || task.dueDate || (task.priority && task.priority !== 'MEDIUM') || assignee) && (
+          <div className="flex items-end justify-between mt-1 pl-6 min-h-[24px]">
+            <div className="flex flex-wrap items-center gap-2">
+              {task.priority && task.priority !== 'MEDIUM' && (
+                <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md border ${priorityColors[task.priority]}`}><Flag size={10} /> {priorityLabels[task.priority]}</div>
+              )}
+              {task.description && <div className="text-[#A39E99] bg-[#F4F1ED] p-1 rounded-md border border-[#D6D2CF]"><AlignLeft size={12} /></div>}
+              {task.dueDate && <div className={`flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-md border ${isOverdue ? 'bg-red-50 text-red-600 border-red-200' : 'bg-[#F4E3E4] text-[#7A1D22] border-[#E8C4C6]'}`}><Calendar size={12} /> {new Date(task.dueDate).toLocaleDateString('pt-BR', { timeZone: 'UTC', day: '2-digit', month: 'short' })}</div>}
+            </div>
+            {/* 🔥 IDENTIDADE: O Avatar de responsabilidade nas Cores Elegantes */}
+            {assignee && <div className={`w-6 h-6 rounded-full ${getAvatarColor(assignee.name)} text-white flex items-center justify-center font-bold text-[10px] uppercase ring-2 ring-white shadow-sm shrink-0 ml-auto`} title={`Responsável: ${assignee.name}`}>{assignee.name.substring(0, 2)}</div>}
+          </div>
+        )}
+      </div>
+
+      {isModalOpen && !isOverlay && <TaskModal task={task} canEdit={canEdit} onClose={() => setIsModalOpen(false)} />}
+    </>
+  );
+}
+EOF
+
+echo "🎨 4. Frontend: Aplicando o Botão de Lista Tracejado Bordô..."
+
+cat << 'EOF' > apps/web/src/components/board/Board.tsx
+import { useState, useEffect } from 'react';
+import { DndContext, DragOverlay, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, defaultDropAnimationSideEffects } from '@dnd-kit/core';
+import { SortableContext, arrayMove, sortableKeyboardCoordinates, horizontalListSortingStrategy } from '@dnd-kit/sortable';
+import { Column } from './Column';
+import { TaskCard } from './TaskCard';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
+import { socket } from '@/lib/socket';
+
+export function Board({ initialData }: { initialData: any }) {
+  const queryClient = useQueryClient();
+  
+  const [columns, setColumns] = useState<any[]>(initialData?.columns || []);
+  
+  const [activeTask, setActiveTask] = useState<any>(null);
+  const [activeColumn, setActiveColumn] = useState<any>(null);
+
+  const { data: user } = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get('/me')).data.user });
+  const userId = user?.id;
+
+  const { data: boardData } = useQuery({
+    queryKey: ['board', initialData.id],
+    queryFn: async () => (await api.get(`/kanban/board/${initialData.id}`)).data,
+    initialData: initialData,
+  });
+
+  const isRestricted = boardData?.userRole === 'RESTRICTED';
+
+  useEffect(() => { if (boardData?.columns) setColumns(boardData.columns); }, [boardData]);
+
+  useEffect(() => {
+    socket.connect();
+    socket.on('boardUpdated', (data) => { if (data.boardId === initialData.id) queryClient.invalidateQueries({ queryKey: ['board', initialData.id] }); });
+    return () => { socket.off('boardUpdated'); };
+  }, [initialData.id, queryClient]);
+
+  const updateTaskPosition = useMutation({
+    mutationFn: async ({ taskId, columnId, order }: any) => await api.patch(`/kanban/tasks/${taskId}`, { columnId, order }),
+    onError: (err: any) => { toast.error(err.response?.data?.message || 'Acesso negado.'); queryClient.invalidateQueries({ queryKey: ['board', initialData.id] }); }
+  });
+
+  const updateColumnPosition = useMutation({
+    mutationFn: async ({ columnId, order }: any) => await api.patch(`/kanban/columns/${columnId}`, { order }),
+    onError: (err: any) => { toast.error(err.response?.data?.message || 'Erro ao mover lista.'); queryClient.invalidateQueries({ queryKey: ['board', initialData.id] }); }
+  });
+
+  const createColumnMutation = useMutation({
+    mutationFn: async (title: string) => await api.post('/kanban/columns', { title, boardId: initialData.id, order: columns.length }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board', initialData.id] })
+  });
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), 
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
+
+  const handleDragStart = (event: any) => {
+    const { active } = event;
+    const type = active.data.current?.type;
+
+    if (type === 'Column') {
+      setActiveColumn(active.data.current.column);
+      return;
+    }
+    if (type === 'Task') {
+      const col = columns.find((c: any) => c.tasks.some((t: any) => t.id === active.id));
+      setActiveTask(col?.tasks.find((t: any) => t.id === active.id));
+      return;
+    }
+  };
+
+  const handleDragOver = (event: any) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+
+    const isActiveTask = active.data.current?.type === 'Task';
+    if (!isActiveTask) return;
+
+    const activeId = active.id;
+    const overId = over.id;
+
+    const activeColIndex = columns.findIndex((c: any) => c.tasks.some((t: any) => t.id === activeId));
+    let overColIndex = -1;
+    
+    if (over.data.current?.type === 'Task') {
+      overColIndex = columns.findIndex((c: any) => c.tasks.some((t: any) => t.id === overId));
+    } else if (over.data.current?.type === 'Column') {
+      overColIndex = columns.findIndex((c: any) => c.id === overId);
+    }
+
+    if (activeColIndex === -1 || overColIndex === -1 || activeColIndex === overColIndex) return;
+
+    setColumns((prev: any[]) => {
+      const activeCol = prev[activeColIndex];
+      const overCol = prev[overColIndex];
+      const taskIndex = activeCol.tasks.findIndex((t: any) => t.id === activeId);
+      const task = activeCol.tasks[taskIndex];
+
+      return prev.map((c: any, i: number) => {
+        if (i === activeColIndex) return { ...c, tasks: c.tasks.filter((t: any) => t.id !== activeId) };
+        if (i === overColIndex) {
+          const overTaskIndex = over.data.current?.type === 'Task' ? overCol.tasks.findIndex((t: any) => t.id === overId) : overCol.tasks.length;
+          const newIndex = overTaskIndex >= 0 ? overTaskIndex : overCol.tasks.length;
+          const newTasks = [...overCol.tasks];
+          newTasks.splice(newIndex, 0, { ...task, columnId: overCol.id });
+          return { ...c, tasks: newTasks };
+        }
+        return c;
+      });
+    });
+  };
+
+  const handleDragEnd = (event: any) => {
+    setActiveTask(null);
+    setActiveColumn(null);
+    
+    const { active, over } = event;
+    if (!over) return;
+
+    const activeType = active.data.current?.type;
+
+    if (activeType === 'Column') {
+      const activeId = active.id;
+      const overId = over.id;
+
+      const activeColIndex = columns.findIndex((c: any) => c.id === activeId);
+      const overColIndex = columns.findIndex((c: any) => c.id === overId);
+
+      if (activeColIndex !== overColIndex && activeColIndex !== -1 && overColIndex !== -1) {
+        let newCols = arrayMove(columns, activeColIndex, overColIndex);
+        
+        let newOrder = 0;
+        const prevCol: any = newCols[overColIndex - 1];
+        const nextCol: any = newCols[overColIndex + 1];
+
+        if (prevCol && nextCol) newOrder = (prevCol.order + nextCol.order) / 2.0;
+        else if (prevCol) newOrder = prevCol.order + 1.0;
+        else if (nextCol) newOrder = nextCol.order / 2.0;
+        else newOrder = 1.0;
+
+        newCols[overColIndex] = { ...newCols[overColIndex], order: newOrder };
+        setColumns(newCols);
+        updateColumnPosition.mutate({ columnId: active.id, order: newOrder });
+      }
+      return;
+    }
+
+    if (activeType === 'Task') {
+      const activeId = active.id;
+      const overId = over.id;
+
+      const activeColIndex = columns.findIndex((c: any) => c.tasks.some((t: any) => t.id === activeId));
+      if (activeColIndex === -1) return;
+
+      const activeCol = columns[activeColIndex];
+      const taskIndex = activeCol.tasks.findIndex((t: any) => t.id === activeId);
+      const task = activeCol.tasks[taskIndex];
+
+      if (isRestricted && task.assignedTo !== userId) {
+        toast.error("Acesso Restrito: Apenas o responsável pode mover a tarefa.");
+        queryClient.invalidateQueries({ queryKey: ['board', initialData.id] });
+        return;
+      }
+
+      const overColIndex = columns.findIndex((c: any) => c.id === overId || c.tasks.some((t: any) => t.id === overId));
+      if (overColIndex === -1) return;
+      
+      const overCol = columns[overColIndex];
+      let overTaskIndex = overCol.tasks.findIndex((t: any) => t.id === overId);
+
+      let targetTasks = [...activeCol.tasks];
+      let finalIndex = taskIndex;
+
+      if (activeColIndex === overColIndex) {
+        if (overTaskIndex !== -1 && taskIndex !== overTaskIndex) {
+          finalIndex = overTaskIndex;
+          targetTasks = arrayMove(activeCol.tasks, taskIndex, overTaskIndex);
+        } else if (overId === overCol.id && taskIndex !== activeCol.tasks.length - 1) {
+          finalIndex = activeCol.tasks.length - 1; 
+          targetTasks = arrayMove(activeCol.tasks, taskIndex, finalIndex);
+        }
+      }
+
+      let newOrder = 0;
+      const prevTask: any = targetTasks[finalIndex - 1];
+      const nextTask: any = targetTasks[finalIndex + 1];
+
+      if (prevTask && nextTask) newOrder = (prevTask.order + nextTask.order) / 2.0; 
+      else if (prevTask) newOrder = prevTask.order + 1.0; 
+      else if (nextTask) newOrder = nextTask.order / 2.0; 
+      else newOrder = 1.0; 
+
+      setColumns((prev: any[]) => {
+        const newCols = [...prev];
+        newCols[activeColIndex].tasks = targetTasks;
+        newCols[activeColIndex].tasks[finalIndex] = { ...task, order: newOrder };
+        return newCols;
+      });
+
+      updateTaskPosition.mutate({ taskId: activeId, columnId: activeCol.id, order: newOrder });
+    }
+  };
+
+  const handleAddColumn = () => {
+    const title = prompt('Nome da nova etapa:');
+    if (title) createColumnMutation.mutate(title);
+  };
+
+  const dropAnimation = { sideEffects: defaultDropAnimationSideEffects({ styles: { active: { opacity: '0.4' } } }) };
+
+  return (
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
+      <div className="flex gap-6 h-full pb-4 items-start pt-2">
+        <SortableContext items={columns.map((c: any) => c.id)} strategy={horizontalListSortingStrategy}>
+          {columns.map((col: any) => (
+            <Column key={col.id} column={col} tasks={col.tasks} isRestricted={isRestricted} userId={userId as string} />
+          ))}
+        </SortableContext>
+        
+        {!isRestricted && (
+          <div className="w-80 shrink-0">
+            {/* 🔥 IDENTIDADE: O Botão Tracejado Burgundy */}
+            <button onClick={handleAddColumn} disabled={createColumnMutation.isPending} className="w-full flex items-center justify-center gap-2 py-4 border-2 border-dashed border-[#7A1D22]/40 rounded-2xl text-[#7A1D22] hover:bg-[#7A1D22]/5 transition-all font-semibold shadow-sm bg-transparent">
+              {createColumnMutation.isPending ? 'Criando...' : '+ Criar Nova Lista'}
+            </button>
+          </div>
+        )}
+      </div>
+      <DragOverlay dropAnimation={dropAnimation}>
+        {activeTask ? <TaskCard task={activeTask} isRestricted={isRestricted} userId={userId as string} isOverlay /> : null}
+        {activeColumn ? <Column column={activeColumn} tasks={activeColumn.tasks} isRestricted={isRestricted} userId={userId as string} isOverlay /> : null}
+      </DragOverlay>
+    </DndContext>
+  );
+}
+EOF
+
+echo "🚀 2. Recompilando o Frontend com a Nova Pele..."
+cd apps/web && pnpm run build
+cd ../..
+
+echo "✅=========================================================="
+echo "🎯 THEME WHITE-LABEL APLICADO! O SEU SISTEMA ESTÁ LUXUOSO."
+echo "✅=========================================================="

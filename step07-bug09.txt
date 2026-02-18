@@ -1,0 +1,80 @@
+#!/bin/bash
+set -e
+
+echo "🧹 1. Faxina de Arquitetura: Removendo módulos fantasmas (Step 03)..."
+rm -rf apps/api/src/boards
+rm -rf apps/api/src/lists
+rm -rf apps/api/src/cards
+rm -rf apps/api/dist
+
+echo "🏗️ 2. Reescrevendo o Maestro (AppModule) para enxergar apenas o código blindado..."
+cat << 'EOF' > apps/api/src/app.module.ts
+import { Module } from '@nestjs/common';
+import { AppController } from './app.controller';
+import { PrismaModule } from './prisma/prisma.module';
+import { AuthModule } from './auth/auth.module';
+import { KanbanModule } from './kanban/kanban.module';
+import { EventsModule } from './events/events.module';
+
+@Module({
+  imports: [
+    PrismaModule,
+    AuthModule,
+    KanbanModule,
+    EventsModule
+  ],
+  controllers: [AppController],
+})
+export class AppModule {}
+EOF
+
+echo "📝 3. Garantindo o AppController com as rotas reais de usuário e quadros..."
+cat << 'EOF' > apps/api/src/app.controller.ts
+import { Controller, Get, Post, Body, Request, UseGuards } from '@nestjs/common';
+import { PrismaService } from './prisma/prisma.service';
+import { KanbanGuard } from './auth/kanban.guard';
+
+@UseGuards(KanbanGuard)
+@Controller()
+export class AppController {
+  constructor(private prisma: PrismaService) {}
+
+  @Get('me')
+  async getProfile(@Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user) user.passwordHash = 'hidden';
+    return { user: user || req.user };
+  }
+
+  @Get('boards')
+  async getBoards(@Request() req: any) {
+    const userId = req.user?.sub || req.user?.id;
+    return this.prisma.board.findMany({
+      where: { createdById: userId },
+      orderBy: { createdAt: 'desc' }
+    });
+  }
+
+  @Post('boards')
+  async createBoard(@Request() req: any, @Body() body: { name: string }) {
+    const userId = req.user?.sub || req.user?.id;
+    return this.prisma.board.create({
+      data: {
+        name: body.name,
+        createdById: userId
+      }
+    });
+  }
+}
+EOF
+
+echo "🚀 4. Recompilando o Backend do zero absoluto..."
+cd apps/api
+pnpm run build
+cd ../..
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 LIMPEZA CONCLUÍDA! O CAMINHO ESTÁ LIVRE E SEM FANTASMAS."
+echo "✅=========================================================="

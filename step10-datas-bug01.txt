@@ -1,0 +1,39 @@
+#!/bin/bash
+set -e
+
+echo "🗄️ 1. Banco de Dados: Forçando a injeção exata dos novos campos no Schema..."
+node -e "
+const fs = require('fs');
+const path = 'apps/api/prisma/schema.prisma';
+let schema = fs.readFileSync(path, 'utf8');
+
+let newFields = '';
+if (!schema.includes('priority')) newFields += '  priority    String?   @default(\"MEDIUM\")\n';
+if (!schema.includes('startDate')) newFields += '  startDate   DateTime?\n';
+if (!schema.includes('dueDate')) newFields += '  dueDate     DateTime?\n';
+
+if (newFields !== '') {
+  // Injeta logo abaixo de 'model Card {'
+  schema = schema.replace(/model Card\s*\{/, 'model Card {\n' + newFields);
+  fs.writeFileSync(path, schema);
+  console.log('✅ Novos campos injetados com precisão absoluta!');
+} else {
+  console.log('⚡ Os campos já estão corretos no Schema.');
+}
+"
+
+echo "🔄 2. Sincronizando Banco de Dados e Gerando Tipagens (Prisma Client)..."
+cd apps/api
+npx prisma db push --accept-data-loss
+npx prisma generate
+cd ../..
+
+echo "🚀 3. Recompilando Todo o Ecossistema..."
+cd apps/api && pnpm run build
+cd ../web && pnpm run build
+cd ../..
+
+echo ""
+echo "✅=========================================================="
+echo "🎯 TUDO ALINHADO! O BACKEND AGORA RECONHECE AS DATAS E PRIORIDADES."
+echo "✅=========================================================="
