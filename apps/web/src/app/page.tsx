@@ -60,6 +60,23 @@ export default function Home() {
 
   if (!mounted || userLoading) return null;
 
+    const handleDeleteBoard = async (id, e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!window.confirm('AtenÃ§Ã£o: Tem certeza que deseja excluir este quadro permanentemente?')) return;
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+      const res = await fetch(`${apiUrl}/boards/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        window.location.reload(); 
+      } else {
+        alert('Erro ao excluir. O quadro pode conter tarefas associadas que precisam ser apagadas antes.');
+      }
+    } catch (error) {
+      console.error('Erro na API:', error);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 font-sans">
       <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between sticky top-0 z-10 shadow-sm">
@@ -76,7 +93,12 @@ export default function Home() {
                 {userData.name?.substring(0, 2)}
               </div>
               <div className="hidden sm:flex sm:flex-col sm:justify-center">
-                <span className="text-sm font-bold text-slate-700 leading-none">{userData.name}</span>
+                <div className="flex items-center gap-2">
+  <button onClick={(e) => handleDeleteBoard({userData.name}.replace('.title', '.id').replace('.name', '.id').replace('.nome', '.id').replace('{', '').replace('}', ''), e)} className="text-slate-300 hover:text-red-500 transition-colors z-20" title="Excluir Quadro">
+    <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+  </button>
+  <span className="text-sm font-bold text-slate-700 leading-none">{userData.name}</span>
+</div>
                 <span className="text-[10px] font-medium text-slate-400 mt-0.5">{userData.email}</span>
               </div>
             </div>
@@ -101,7 +123,12 @@ export default function Home() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
             {boards?.map((board: any) => (
               <Link key={board.id} href={`/board/${board.id}`} className="group relative bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md hover:border-blue-400 transition-all flex flex-col h-40">
-                <h2 className="text-lg font-bold text-slate-800 mb-2 group-hover:text-blue-600 transition-colors line-clamp-2 leading-snug">{board.name}</h2>
+                <div className="flex items-center gap-2">
+  <button onClick={(e) => handleDeleteBoard({board.name}.replace('.title', '.id').replace('.name', '.id').replace('.nome', '.id').replace('{', '').replace('}', ''), e)} className="text-slate-300 hover:text-red-500 transition-colors z-20" title="Excluir Quadro">
+    <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+  </button>
+  <h2 className="text-lg font-bold text-slate-800 mb-2 group-hover:text-blue-600 transition-colors line-clamp-2 leading-snug">{board.name}</h2>
+</div>
                 <div className="mt-auto flex items-center justify-between text-xs text-slate-400 font-medium">
                   {/* Etiquetas Inteligentes (Dono vs Membro) */}
                   {board.createdById === userData.id ? (

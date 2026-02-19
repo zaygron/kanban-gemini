@@ -1,4 +1,28 @@
-import { useState, useEffect } from 'react';
+import 
+const falcarePrompt = (message) => {
+  return new Promise((resolve) => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 p-6 bg-white rounded-xl shadow-2xl border-t-4 border-blue-500 backdrop:bg-slate-900/60 backdrop:backdrop-blur-sm z-[9999] w-96 m-0';
+    dialog.innerHTML = `
+      <h2 class="text-xl font-bold mb-1 text-slate-800">Falcare Kanban</h2>
+      <p class="mb-5 text-sm text-slate-500">${message}</p>
+      <input type="text" id="falcare-input" class="w-full border-2 border-slate-200 focus:border-blue-500 outline-none p-3 rounded-lg mb-6 text-slate-800" autocomplete="off" />
+      <div class="flex justify-end gap-3">
+        <button id="falcare-cancel" class="px-4 py-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 rounded-lg font-medium transition-colors cursor-pointer">Cancelar</button>
+        <button id="falcare-ok" class="px-6 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors shadow-sm cursor-pointer">OK</button>
+      </div>
+    `;
+    document.body.appendChild(dialog);
+    dialog.showModal();
+    const input = dialog.querySelector('#falcare-input');
+    input.focus();
+    const close = (val) => { dialog.close(); dialog.remove(); resolve(val); };
+    dialog.querySelector('#falcare-ok').onclick = () => close(input.value);
+    dialog.querySelector('#falcare-cancel').onclick = () => close(null);
+    input.onkeydown = (e) => { if (e.key === 'Enter') close(input.value); };
+  });
+};
+{ useState, useEffect } from 'react';
 import { DndContext, DragOverlay, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, defaultDropAnimationSideEffects } from '@dnd-kit/core';
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, horizontalListSortingStrategy } from '@dnd-kit/sortable';
 import { Column } from './Column';
@@ -202,8 +226,8 @@ export function Board({ initialData }: { initialData: any }) {
     }
   };
 
-  const handleAddColumn = () => {
-    const title = prompt('Nome da nova etapa:');
+  const handleAddColumn = async () => {
+    const title = await falcarePrompt('Nome da nova tarefa:');
     if (title) createColumnMutation.mutate(title);
   };
 
