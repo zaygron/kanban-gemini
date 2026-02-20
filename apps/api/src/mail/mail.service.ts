@@ -13,7 +13,7 @@ export class MailService {
         const pass = process.env.SMTP_PASS;
 
         if (host && port) {
-            const transportConfig: nodemailer.TransportOptions = {
+            const transportConfig: any = {
                 host,
                 port,
                 secure: port === 465, // true for 465, false for other ports
