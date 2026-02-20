@@ -49,4 +49,4 @@ WORKDIR /app/apps/api
 
 EXPOSE 3001
 
-CMD ["pnpm", "start:prod"]
+CMD ["pnpm", "start"]
