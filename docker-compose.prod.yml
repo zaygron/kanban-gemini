@@ -22,6 +22,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-kanban_user}:${POSTGRES_PASSWORD:-kanban_password}@postgres:5432/${POSTGRES_DB:-kanban_db}
       JWT_SECRET: ${JWT_SECRET:-supersecretkey}
       PORT: 3001
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       SMTP_HOST: ${SMTP_HOST}
       SMTP_PORT: ${SMTP_PORT}
       SMTP_USER: ${SMTP_USER}
@@ -36,6 +37,8 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
     container_name: kanban_web
     restart: always
     environment:

@@ -14,11 +14,11 @@ COPY packages/shared ./packages/shared
 # Copy API types/interfaces if shared? Assuming no shared lib folder for now based on file list.
 
 # Install dependencies
-RUN pnpm install --frozen-lockfile
+RUN pnpm install
 
 # Build the Web App
-# We need to set env vars usually needed for build if they are baked in (NEXT_PUBLIC_...)
-# docker-compose build args can pass these if needed.
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 ENV NEXT_TELEMETRY_DISABLED 1
 RUN pnpm --filter web build
 

@@ -59,8 +59,9 @@ export class AuthController {
       }
     });
 
-    // Enviar E-mail (Mock por enquanto)
-    const inviteLink = `http://localhost:3000/login?email=${encodeURIComponent(body.email)}`;
+    // Enviar E-mail
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const inviteLink = `${frontendUrl}/login?email=${encodeURIComponent(body.email)}`;
     await this.mailService.sendInvite(body.email, inviteLink, tempPassword);
 
     return { success: true, message: 'Convite enviado!', tempPassword }; // tempPassword retornado só para debug/dev
