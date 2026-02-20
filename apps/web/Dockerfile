@@ -10,6 +10,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
 # Copy app directory
 COPY apps/web ./apps/web
+COPY packages/shared ./packages/shared
 # Copy API types/interfaces if shared? Assuming no shared lib folder for now based on file list.
 
 # Install dependencies
@@ -35,6 +36,7 @@ RUN npm install -g pnpm
 COPY --from=builder /app/apps/web/package.json ./apps/web/package.json
 COPY --from=builder /app/apps/web/.next ./apps/web/.next
 COPY --from=builder /app/apps/web/public ./apps/web/public
+COPY --from=builder /app/packages/shared ./packages/shared
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/apps/web/node_modules ./apps/web/node_modules
 
