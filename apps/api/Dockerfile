@@ -13,8 +13,8 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/api ./apps/api
 COPY packages/shared ./packages/shared
 
-# Install dependencies (frozen-lockfile for consistency)
-RUN pnpm install --frozen-lockfile
+# Install dependencies (frozen-lockfile removed to allow new packages)
+RUN pnpm install
 
 # Generate Prisma
 RUN pnpm --filter api run prisma:generate
