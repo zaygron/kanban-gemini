@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
@@ -24,6 +25,12 @@ model User {
   comments      Comment[]
   activities    ActivityLog[]
 
+  role               Role     @default(COMMON)
+  mustChangePassword Boolean  @default(false) @map("must_change_password")
+  invitedById        String?  @map("invited_by") @db.Uuid
+  invitedBy          User?    @relation("UserInvites", fields: [invitedById], references: [id], onDelete: SetNull)
+  invitees           User[]   @relation("UserInvites")
+
   @@map("users")
 }
 
@@ -38,7 +45,7 @@ model Board {
   archivedAt  DateTime? @map("archived_at") @db.Timestamptz
   version     Int       @default(1)
 
-  createdBy   User          @relation(fields: [createdById], references: [id])
+  createdBy   User          @relation(fields: [createdById], references: [id], onDelete: Cascade)
   memberships Membership[]
   lists       List[]
   cards       Card[]
@@ -101,8 +108,8 @@ model Card {
 
   board    Board   @relation(fields: [boardId], references: [id])
   list     List    @relation(fields: [listId], references: [id])
-  assignee User?   @relation("CardAssignee", fields: [assignedTo], references: [id])
-  creator  User    @relation("CardCreator", fields: [createdById], references: [id])
+  assignee User?   @relation("CardAssignee", fields: [assignedTo], references: [id], onDelete: SetNull)
+  creator  User    @relation("CardCreator", fields: [createdById], references: [id], onDelete: Cascade)
   comments Comment[]
 
   @@index([listId, rank])
@@ -119,7 +126,7 @@ model Comment {
   archivedAt DateTime? @map("archived_at") @db.Timestamptz
 
   card   Card @relation(fields: [cardId], references: [id])
-  author User @relation(fields: [authorId], references: [id])
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
 
   @@index([cardId, createdAt])
   @@map("comments")
@@ -136,10 +143,16 @@ model ActivityLog {
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
 
   board Board @relation(fields: [boardId], references: [id])
-  actor User  @relation(fields: [actorUserId], references: [id])
+  actor User  @relation(fields: [actorUserId], references: [id], onDelete: Cascade)
 
   @@index([boardId, createdAt])
   @@map("activity_logs")
+}
+
+enum Role {
+  MASTER
+  ADMIN
+  COMMON
 }
 
 

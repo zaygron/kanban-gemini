@@ -4,15 +4,18 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import toast from 'react-hot-toast';
 
 export default function LoginPage() {
   const [isLogin, setIsLogin] = useState(true);
-  
+
   const [name, setName] = useState('');
   const [email, setEmail] = useState('owner@kanban.com');
   const [password, setPassword] = useState('123456');
+  const [mustChangePassword, setMustChangePassword] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
   const [error, setError] = useState('');
-  
+
   const router = useRouter();
   const queryClient = useQueryClient();
 
@@ -28,34 +31,48 @@ export default function LoginPage() {
     },
     onSuccess: (data) => {
       localStorage.setItem('kanban_token', data.token);
+
+      if (data.user.mustChangePassword) {
+        setMustChangePassword(true);
+        toast('Por segurança, defina uma nova senha.', { icon: '🔒' });
+      } else {
+        queryClient.invalidateQueries({ queryKey: ['me'] });
+        router.push('/');
+      }
+    },
+    onError: (err: any) => {
+      const msg = err.response?.data?.message || 'Erro de autenticação.';
+      setError(msg);
+    },
+  });
+
+  const changePasswordMutation = useMutation({
+    mutationFn: async () => await api.patch('/auth/change-password', { newPassword }),
+    onSuccess: () => {
+      toast.success('Senha atualizada com sucesso!');
       queryClient.invalidateQueries({ queryKey: ['me'] });
       router.push('/');
     },
-    onError: (err: any) => {
-      // Captura o erro customizado da nossa API (ex: "E-mail já está em uso")
-      const msg = err.response?.data?.message || 'Erro de autenticação. Verifique os dados.';
-      setError(msg);
-    },
+    onError: (err: any) => toast.error(err.response?.data?.message || 'Erro ao trocar senha.')
   });
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    authMutation.mutate();
+
+    if (mustChangePassword) {
+      if (newPassword.length < 6) { setError('A nova senha deve ter no mínimo 6 caracteres.'); return; }
+      changePasswordMutation.mutate();
+    } else {
+      authMutation.mutate();
+    }
   };
 
   const toggleMode = () => {
     setIsLogin(!isLogin);
     setError('');
-    if (isLogin) {
-      // Se for criar conta, limpa a tela
-      setEmail('');
-      setPassword('');
-    } else {
-      // Se for logar, volta para a sua master para facilitar os testes
-      setEmail('owner@kanban.com');
-      setPassword('123456');
-    }
+    // ... rest of toggleMode
+    if (isLogin) { setEmail(''); setPassword(''); } else { setEmail('owner@kanban.com'); setPassword('123456'); }
   };
 
   return (
@@ -63,7 +80,7 @@ export default function LoginPage() {
       <div className="max-w-md w-full p-8 bg-white rounded-xl shadow-lg border border-slate-200 transition-all">
         <h2 className="text-3xl font-bold text-center text-slate-900 mb-2">Kanban v2</h2>
         <p className="text-center text-slate-500 mb-6 text-sm">
-          {isLogin ? 'Entre com suas credenciais para acessar' : 'Crie sua conta para começar a colaborar'}
+          {mustChangePassword ? '🔒 Criação de Nova Senha' : (isLogin ? 'Entre com suas credenciais' : 'Crie sua conta')}
         </p>
 
         {error && (
@@ -73,36 +90,48 @@ export default function LoginPage() {
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          {!isLogin && (
-            <div className="animate-in fade-in slide-in-from-top-2 duration-300">
-              <label className="block text-sm font-medium text-slate-700 mb-1">Nome Completo</label>
-              <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex: João da Silva" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition" required />
+          {mustChangePassword ? (
+            <div className="animate-in fade-in zoom-in duration-300">
+              <label className="block text-sm font-medium text-slate-700 mb-1">Nova Senha</label>
+              <input type="password" autoFocus value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Nova senha segura" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-violet-500 outline-none transition" required minLength={6} />
+              <p className="text-xs text-slate-400 mt-2">Você precisa definir uma nova senha no primeiro acesso.</p>
             </div>
-          )}
-          
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">E-mail</label>
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="seu@email.com" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition" required />
-          </div>
-          
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">Senha</label>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mínimo 6 caracteres" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition" required minLength={6} />
-          </div>
+          ) : (
+            <>
+              {!isLogin && (
+                <div className="animate-in fade-in slide-in-from-top-2 duration-300">
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Nome Completo</label>
+                  <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex: João da Silva" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition" required />
+                </div>
+              )}
 
-          <button type="submit" disabled={authMutation.isPending} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg transition-colors disabled:opacity-50 mt-2 shadow-sm">
-            {authMutation.isPending ? 'Processando...' : (isLogin ? 'Entrar' : 'Criar Conta')}
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">E-mail</label>
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="seu@email.com" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition" required disabled={mustChangePassword} />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Senha</label>
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="********" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition" required disabled={mustChangePassword} />
+              </div>
+            </>
+          )}
+
+          <button type="submit" disabled={authMutation.isPending || changePasswordMutation.isPending} className={`w-full font-semibold py-2.5 rounded-lg transition-colors disabled:opacity-50 mt-2 shadow-sm ${mustChangePassword ? 'bg-violet-600 hover:bg-violet-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}>
+            {authMutation.isPending || changePasswordMutation.isPending ? 'Processando...' : (mustChangePassword ? 'Salvar Nova Senha' : (isLogin ? 'Entrar' : 'Criar Conta'))}
           </button>
         </form>
 
-        <div className="mt-6 text-center border-t border-slate-100 pt-4">
-          <p className="text-sm text-slate-600">
-            {isLogin ? 'Ainda não tem conta?' : 'Já tem uma conta?'}
-            <button type="button" onClick={toggleMode} className="ml-1 text-blue-600 hover:text-blue-800 font-semibold transition-colors focus:outline-none">
-              {isLogin ? 'Crie uma agora' : 'Faça login aqui'}
-            </button>
-          </p>
-        </div>
+        {!mustChangePassword && (
+          <div className="mt-6 text-center border-t border-slate-100 pt-4">
+            <p className="text-sm text-slate-600">
+              {isLogin ? 'Ainda não tem conta?' : 'Já tem uma conta?'}
+              <button type="button" onClick={toggleMode} className="ml-1 text-blue-600 hover:text-blue-800 font-semibold transition-colors focus:outline-none">
+                {isLogin ? 'Crie uma agora' : 'Faça login aqui'}
+              </button>
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );

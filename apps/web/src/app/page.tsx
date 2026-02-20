@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { LayoutDashboard, LogOut, Plus, ShieldAlert, Crown } from 'lucide-react';
+import { LayoutDashboard, LogOut, Plus, ShieldAlert, Crown, UserCog, Shield } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 
@@ -60,22 +60,7 @@ export default function Home() {
 
   if (!mounted || userLoading) return null;
 
-    const handleDeleteBoard = async (id, e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!window.confirm('AtenÃ§Ã£o: Tem certeza que deseja excluir este quadro permanentemente?')) return;
-    try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
-      const res = await fetch(`${apiUrl}/boards/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        window.location.reload(); 
-      } else {
-        alert('Erro ao excluir. O quadro pode conter tarefas associadas que precisam ser apagadas antes.');
-      }
-    } catch (error) {
-      console.error('Erro na API:', error);
-    }
-  };
+
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans">
@@ -84,27 +69,31 @@ export default function Home() {
           <LayoutDashboard size={24} />
           <h1 className="text-xl font-bold text-slate-900 tracking-tight">Meus Projetos</h1>
         </div>
-        
+
         {/* Identificação de Sessão Clara e Logout */}
         {userData && (
-          <div className="flex items-center gap-4 bg-slate-50 border border-slate-100 px-4 py-1.5 rounded-full shadow-sm">
-            <div className="flex items-center gap-2 border-r border-slate-200 pr-4">
-              <div className="w-7 h-7 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-xs uppercase shadow-sm">
-                {userData.name?.substring(0, 2)}
-              </div>
-              <div className="hidden sm:flex sm:flex-col sm:justify-center">
-                <div className="flex items-center gap-2">
-  <button onClick={(e) => handleDeleteBoard({userData.name}.replace('.title', '.id').replace('.name', '.id').replace('.nome', '.id').replace('{', '').replace('}', ''), e)} className="text-slate-300 hover:text-red-500 transition-colors z-20" title="Excluir Quadro">
-    <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-  </button>
-  <span className="text-sm font-bold text-slate-700 leading-none">{userData.name}</span>
-</div>
-                <span className="text-[10px] font-medium text-slate-400 mt-0.5">{userData.email}</span>
-              </div>
+          <div className="flex items-center gap-4">
+            {(userData.role === 'MASTER' || userData.role === 'ADMIN') && (
+              <Link href="/admin" className="text-slate-500 hover:text-violet-600 hover:bg-violet-50 px-3 py-2 rounded-lg transition-colors flex items-center gap-2 text-sm font-bold" title="Painel Administrativo">
+                <UserCog size={18} /> <span className="hidden sm:block">Admin</span>
+              </Link>
+            )}
+            <div className="flex items-center gap-4 bg-slate-50 border border-slate-100 px-4 py-1.5 rounded-full shadow-sm">
+              <Link href="/profile" className="flex items-center gap-2 border-r border-slate-200 pr-4 hover:bg-slate-100 p-1 rounded-lg transition-colors group" title="Editar Perfil">
+                <div className="w-7 h-7 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-xs uppercase shadow-sm group-hover:scale-105 transition-transform">
+                  {userData.name?.substring(0, 2)}
+                </div>
+                <div className="hidden sm:flex sm:flex-col sm:justify-center">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold text-slate-700 leading-none group-hover:text-blue-600 transition-colors">{userData.name}</span>
+                  </div>
+                  <span className="text-[10px] font-medium text-slate-400 mt-0.5">{userData.email}</span>
+                </div>
+              </Link>
+              <button onClick={handleLogout} className="text-slate-400 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-lg transition-colors flex items-center gap-1.5 text-sm font-semibold" title="Sair do Sistema">
+                <LogOut size={16} /> <span className="hidden sm:block">Sair</span>
+              </button>
             </div>
-            <button onClick={handleLogout} className="text-slate-400 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-lg transition-colors flex items-center gap-1.5 text-sm font-semibold" title="Sair do Sistema">
-              <LogOut size={16} /> <span className="hidden sm:block">Sair</span>
-            </button>
           </div>
         )}
       </header>
@@ -124,23 +113,22 @@ export default function Home() {
             {boards?.map((board: any) => (
               <Link key={board.id} href={`/board/${board.id}`} className="group relative bg-white p-5 rounded-2xl border border-slate-200 shadow-sm hover:shadow-md hover:border-blue-400 transition-all flex flex-col h-40">
                 <div className="flex items-center gap-2">
-  <button onClick={(e) => handleDeleteBoard({board.name}.replace('.title', '.id').replace('.name', '.id').replace('.nome', '.id').replace('{', '').replace('}', ''), e)} className="text-slate-300 hover:text-red-500 transition-colors z-20" title="Excluir Quadro">
-    <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-  </button>
-  <h2 className="text-lg font-bold text-slate-800 mb-2 group-hover:text-blue-600 transition-colors line-clamp-2 leading-snug">{board.name}</h2>
-</div>
+                  <h2 className="text-lg font-bold text-slate-800 mb-2 group-hover:text-blue-600 transition-colors line-clamp-2 leading-snug">{board.name}</h2>
+                </div>
                 <div className="mt-auto flex items-center justify-between text-xs text-slate-400 font-medium">
-                  {/* Etiquetas Inteligentes (Dono vs Membro) */}
+                  {/* Etiquetas Inteligentes (Dono vs Membro vs Supervisão) */}
                   {board.createdById === userData.id ? (
-                    <span className="text-blue-600 bg-blue-50 px-2 py-1 rounded-md border border-blue-100 flex items-center gap-1 font-bold"><Crown size={12}/> Seu Projeto</span>
-                  ) : (
-                    <span className="text-emerald-700 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-200 flex items-center gap-1 font-bold"><ShieldAlert size={12}/> Compartilhado</span>
-                  )}
+                    <span className="text-blue-600 bg-blue-50 px-2 py-1 rounded-md border border-blue-100 flex items-center gap-1 font-bold"><Crown size={12} /> Seu Projeto</span>
+                  ) : board.members?.some((m: any) => m.userId === userData.id) ? (
+                    <span className="text-emerald-700 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-200 flex items-center gap-1 font-bold"><ShieldAlert size={12} /> Compartilhado</span>
+                  ) : (userData.role === 'MASTER' || userData.role === 'ADMIN') ? (
+                    <span className="text-amber-700 bg-amber-50 px-2 py-1 rounded-md border border-amber-200 flex items-center gap-1 font-bold"><Shield size={12} /> Supervisão</span>
+                  ) : null}
                   <span className="group-hover:translate-x-1 transition-transform">Entrar &rarr;</span>
                 </div>
               </Link>
             ))}
-            
+
             {boards?.length === 0 && (
               <div className="col-span-full py-16 text-center border-2 border-dashed border-slate-200 rounded-3xl bg-slate-50/50">
                 <LayoutDashboard size={48} className="mx-auto text-slate-300 mb-4" />

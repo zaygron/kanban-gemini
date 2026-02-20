@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { AuthController } from './auth.controller';
 import { PrismaModule } from '../prisma/prisma.module';
 import { JwtModule } from '@nestjs/jwt';
+import { MailModule } from '../mail/mail.module';
 
 @Module({
   imports: [
@@ -11,8 +12,9 @@ import { JwtModule } from '@nestjs/jwt';
       secret: process.env.JWT_SECRET || 'super_secret_kanban_key_2026',
       signOptions: { expiresIn: '7d' },
     }),
+    MailModule,
   ],
   // Removido o MeController fantasma que estava quebrando tudo
-  controllers: [AuthController] 
+  controllers: [AuthController]
 })
-export class AuthModule {}
+export class AuthModule { }

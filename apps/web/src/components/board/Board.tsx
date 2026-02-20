@@ -1,28 +1,4 @@
-import 
-const falcarePrompt = (message) => {
-  return new Promise((resolve) => {
-    const dialog = document.createElement('dialog');
-    dialog.className = 'fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 p-6 bg-white rounded-xl shadow-2xl border-t-4 border-blue-500 backdrop:bg-slate-900/60 backdrop:backdrop-blur-sm z-[9999] w-96 m-0';
-    dialog.innerHTML = `
-      <h2 class="text-xl font-bold mb-1 text-slate-800">Falcare Kanban</h2>
-      <p class="mb-5 text-sm text-slate-500">${message}</p>
-      <input type="text" id="falcare-input" class="w-full border-2 border-slate-200 focus:border-blue-500 outline-none p-3 rounded-lg mb-6 text-slate-800" autocomplete="off" />
-      <div class="flex justify-end gap-3">
-        <button id="falcare-cancel" class="px-4 py-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 rounded-lg font-medium transition-colors cursor-pointer">Cancelar</button>
-        <button id="falcare-ok" class="px-6 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors shadow-sm cursor-pointer">OK</button>
-      </div>
-    `;
-    document.body.appendChild(dialog);
-    dialog.showModal();
-    const input = dialog.querySelector('#falcare-input');
-    input.focus();
-    const close = (val) => { dialog.close(); dialog.remove(); resolve(val); };
-    dialog.querySelector('#falcare-ok').onclick = () => close(input.value);
-    dialog.querySelector('#falcare-cancel').onclick = () => close(null);
-    input.onkeydown = (e) => { if (e.key === 'Enter') close(input.value); };
-  });
-};
-{ useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { DndContext, DragOverlay, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, defaultDropAnimationSideEffects } from '@dnd-kit/core';
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, horizontalListSortingStrategy } from '@dnd-kit/sortable';
 import { Column } from './Column';
@@ -32,11 +8,11 @@ import { api } from '@/lib/api';
 import toast from 'react-hot-toast';
 import { socket } from '@/lib/socket';
 
-export function Board({ initialData }: { initialData: any }) {
+export function Board({ initialData, showArchived }: { initialData: any, showArchived: boolean }) {
   const queryClient = useQueryClient();
-  
+
   const [columns, setColumns] = useState<any[]>(initialData?.columns || []);
-  
+
   const [activeTask, setActiveTask] = useState<any>(null);
   const [activeColumn, setActiveColumn] = useState<any>(null);
 
@@ -44,8 +20,8 @@ export function Board({ initialData }: { initialData: any }) {
   const userId = user?.id;
 
   const { data: boardData } = useQuery({
-    queryKey: ['board', initialData.id],
-    queryFn: async () => (await api.get(`/kanban/board/${initialData.id}`)).data,
+    queryKey: ['board', initialData.id, showArchived],
+    queryFn: async () => (await api.get(`/kanban/board/${initialData.id}?includeArchived=${showArchived}`)).data,
     initialData: initialData,
   });
 
@@ -75,7 +51,7 @@ export function Board({ initialData }: { initialData: any }) {
   });
 
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), 
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
 
@@ -106,7 +82,7 @@ export function Board({ initialData }: { initialData: any }) {
 
     const activeColIndex = columns.findIndex((c: any) => c.tasks.some((t: any) => t.id === activeId));
     let overColIndex = -1;
-    
+
     if (over.data.current?.type === 'Task') {
       overColIndex = columns.findIndex((c: any) => c.tasks.some((t: any) => t.id === overId));
     } else if (over.data.current?.type === 'Column') {
@@ -138,7 +114,7 @@ export function Board({ initialData }: { initialData: any }) {
   const handleDragEnd = (event: any) => {
     setActiveTask(null);
     setActiveColumn(null);
-    
+
     const { active, over } = event;
     if (!over) return;
 
@@ -153,7 +129,7 @@ export function Board({ initialData }: { initialData: any }) {
 
       if (activeColIndex !== overColIndex && activeColIndex !== -1 && overColIndex !== -1) {
         let newCols = arrayMove(columns, activeColIndex, overColIndex);
-        
+
         let newOrder = 0;
         const prevCol: any = newCols[overColIndex - 1];
         const nextCol: any = newCols[overColIndex + 1];
@@ -189,7 +165,7 @@ export function Board({ initialData }: { initialData: any }) {
 
       const overColIndex = columns.findIndex((c: any) => c.id === overId || c.tasks.some((t: any) => t.id === overId));
       if (overColIndex === -1) return;
-      
+
       const overCol = columns[overColIndex];
       let overTaskIndex = overCol.tasks.findIndex((t: any) => t.id === overId);
 
@@ -201,7 +177,7 @@ export function Board({ initialData }: { initialData: any }) {
           finalIndex = overTaskIndex;
           targetTasks = arrayMove(activeCol.tasks, taskIndex, overTaskIndex);
         } else if (overId === overCol.id && taskIndex !== activeCol.tasks.length - 1) {
-          finalIndex = activeCol.tasks.length - 1; 
+          finalIndex = activeCol.tasks.length - 1;
           targetTasks = arrayMove(activeCol.tasks, taskIndex, finalIndex);
         }
       }
@@ -210,10 +186,10 @@ export function Board({ initialData }: { initialData: any }) {
       const prevTask: any = targetTasks[finalIndex - 1];
       const nextTask: any = targetTasks[finalIndex + 1];
 
-      if (prevTask && nextTask) newOrder = (prevTask.order + nextTask.order) / 2.0; 
-      else if (prevTask) newOrder = prevTask.order + 1.0; 
-      else if (nextTask) newOrder = nextTask.order / 2.0; 
-      else newOrder = 1.0; 
+      if (prevTask && nextTask) newOrder = (prevTask.order + nextTask.order) / 2.0;
+      else if (prevTask) newOrder = prevTask.order + 1.0;
+      else if (nextTask) newOrder = nextTask.order / 2.0;
+      else newOrder = 1.0;
 
       setColumns((prev: any[]) => {
         const newCols = [...prev];
@@ -226,8 +202,8 @@ export function Board({ initialData }: { initialData: any }) {
     }
   };
 
-  const handleAddColumn = async () => {
-    const title = await falcarePrompt('Nome da nova tarefa:');
+  const handleAddColumn = () => {
+    const title = window.prompt('Nome da nova etapa:');
     if (title) createColumnMutation.mutate(title);
   };
 
@@ -241,7 +217,7 @@ export function Board({ initialData }: { initialData: any }) {
             <Column key={col.id} column={col} tasks={col.tasks} isRestricted={isRestricted} userId={userId as string} />
           ))}
         </SortableContext>
-        
+
         {!isRestricted && (
           <div className="w-80 shrink-0">
             {/* 🔥 IDENTIDADE: O Botão Tracejado Burgundy */}

@@ -5,7 +5,7 @@ import { KanbanGuard } from './auth/kanban.guard';
 @UseGuards(KanbanGuard)
 @Controller()
 export class AppController {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService) { }
 
   @Get('me')
   async getProfile(@Request() req: any) {
@@ -19,6 +19,15 @@ export class AppController {
   @Get('boards')
   async getBoards(@Request() req: any) {
     const userId = req.user?.sub || req.user?.id;
+    const userRole = req.user?.role;
+
+    if (userRole === 'MASTER' || userRole === 'ADMIN') {
+      return this.prisma.board.findMany({
+        orderBy: { createdAt: 'desc' },
+        include: { members: true } // Include members to show badges correctly on frontend
+      });
+    }
+
     return this.prisma.board.findMany({
       where: {
         OR: [
@@ -26,7 +35,8 @@ export class AppController {
           { members: { some: { userId: userId } } }
         ]
       },
-      orderBy: { createdAt: 'desc' }
+      orderBy: { createdAt: 'desc' },
+      include: { members: true }
     });
   }
 

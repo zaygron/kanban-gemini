@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Trash2, Maximize2, AlignLeft, Calendar, Flag, Lock } from 'lucide-react';
+import { GripVertical, Trash2, Maximize2, AlignLeft, Calendar, Flag, Lock, Archive, RotateCcw } from 'lucide-react';
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import toast from 'react-hot-toast';
@@ -21,7 +21,7 @@ export function TaskCard({ task, isOverlay, isRestricted, userId }: { task: any,
   const queryClient = useQueryClient();
   const params = useParams();
   const boardId = params?.id as string;
-  
+
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(task.title);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -30,13 +30,13 @@ export function TaskCard({ task, isOverlay, isRestricted, userId }: { task: any,
 
   const { data } = useQuery({ queryKey: ['boardMembers', boardId], enabled: !!boardId });
   const membersData = data as any;
-  
+
   const canEdit = !isRestricted || task.assignedTo === userId;
 
-  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ 
-    id: task.id, 
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({
+    id: task.id,
     data: { type: 'Task', task },
-    disabled: !canEdit 
+    disabled: !canEdit
   });
 
   let assignee = null;
@@ -48,6 +48,16 @@ export function TaskCard({ task, isOverlay, isRestricted, userId }: { task: any,
   const updateTaskMutation = useMutation({
     mutationFn: async (newTitle: string) => await api.patch(`/kanban/tasks/${task.id}`, { title: newTitle }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['board'] }),
+  });
+
+  const archiveTaskMutation = useMutation({
+    mutationFn: async () => await api.post(`/kanban/tasks/${task.id}/archive`, {}),
+    onSuccess: () => { toast.success('Tarefa arquivada'); queryClient.invalidateQueries({ queryKey: ['board'] }); }
+  });
+
+  const restoreTaskMutation = useMutation({
+    mutationFn: async () => await api.post(`/kanban/tasks/${task.id}/restore`, {}),
+    onSuccess: () => { toast.success('Tarefa restaurada'); queryClient.invalidateQueries({ queryKey: ['board'] }); }
   });
 
   const deleteTaskMutation = useMutation({
@@ -68,22 +78,24 @@ export function TaskCard({ task, isOverlay, isRestricted, userId }: { task: any,
   };
 
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging && !isOverlay ? 0.3 : 1 };
-  const isOverdue = task.dueDate && new Date(task.dueDate) < new Date(new Date().setHours(0,0,0,0));
-  
+  const isOverdue = task.dueDate && new Date(task.dueDate) < new Date(new Date().setHours(0, 0, 0, 0));
+
   // 🔥 IDENTIDADE: Cores de Etiquetas padronizadas
   const priorityColors: Record<string, string> = { HIGH: 'bg-[#F4E3E4] text-[#7A1D22] border-[#E8C4C6]', MEDIUM: 'bg-amber-50 text-amber-700 border-amber-200', LOW: 'bg-stone-50 text-stone-600 border-stone-200' };
   const priorityLabels: Record<string, string> = { HIGH: 'Alta', MEDIUM: 'Média', LOW: 'Baixa' };
 
+  const isArchived = !!task.archivedAt;
+
   return (
     <>
-      <div ref={setNodeRef} style={style} className={`group bg-white p-3.5 rounded-xl shadow-sm border flex flex-col gap-2 relative transition-all ${isOverlay ? 'border-[#7A1D22] shadow-xl rotate-2 scale-105 z-40' : 'border-[#D6D2CF] hover:border-[#7A1D22]/50 hover:shadow-md mb-3'} ${!canEdit && !isOverlay ? 'bg-[#F4F1ED]/70' : ''}`}>
+      <div ref={setNodeRef} style={style} className={`group p-3.5 rounded-xl shadow-sm border flex flex-col gap-2 relative transition-all ${isOverlay ? 'border-[#7A1D22] shadow-xl rotate-2 scale-105 z-40 bg-white' : 'border-[#D6D2CF] hover:border-[#7A1D22]/50 hover:shadow-md mb-3'} ${!canEdit && !isOverlay ? 'bg-[#F4F1ED]/70' : ''} ${isArchived && !isOverlay ? 'bg-stone-100 opacity-70 grayscale' : 'bg-white'}`}>
         <div className="flex items-start gap-2">
           {canEdit ? (
             <div {...attributes} {...listeners} className="mt-0.5 text-[#C8C4BF] hover:text-[#7A1D22] cursor-grab active:cursor-grabbing outline-none touch-none shrink-0"><GripVertical size={16} /></div>
           ) : (
             <div className="mt-0.5 text-[#C8C4BF] cursor-not-allowed shrink-0" title="Acesso Restrito"><Lock size={14} /></div>
           )}
-          
+
           <div className="flex-1 pr-12">
             {isEditing && !isOverlay && canEdit ? (
               <textarea autoFocus value={editTitle} onChange={(e) => setEditTitle(e.target.value)} onBlur={handleSave} onKeyDown={handleKeyDown} onPointerDown={(e) => e.stopPropagation()} className="w-full text-sm font-medium text-stone-800 bg-[#7A1D22]/5 border border-[#7A1D22]/30 rounded px-1 -mx-1 outline-none resize-none overflow-hidden leading-snug" rows={1} onInput={(e) => { const target = e.target as HTMLTextAreaElement; target.style.height = 'auto'; target.style.height = `${target.scrollHeight}px`; }} />
@@ -91,12 +103,21 @@ export function TaskCard({ task, isOverlay, isRestricted, userId }: { task: any,
               <p onClick={() => !isOverlay && canEdit && setIsEditing(true)} className={`text-[14px] font-medium text-[#4A4A4A] leading-snug break-words whitespace-pre-wrap min-h-[20px] ${canEdit ? 'cursor-text hover:bg-stone-50 rounded px-1 -mx-1 transition-colors' : 'cursor-default'}`}>{task.title}</p>
             )}
           </div>
-          
+
           {!isOverlay && !isEditing && (
-            <div className="absolute right-2 top-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 pl-2">
+            <div className="absolute right-2 top-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 pl-2 rounded-bl-lg">
               <button onClick={(e) => { e.stopPropagation(); setIsModalOpen(true); }} className="text-[#A39E99] hover:text-[#7A1D22] hover:bg-[#7A1D22]/10 p-1.5 rounded-md transition-colors border border-transparent hover:border-[#7A1D22]/20" title={canEdit ? "Editar" : "Ver Detalhes"}><Maximize2 size={14} /></button>
               {!isRestricted && (
-                <button onClick={(e) => { e.stopPropagation(); if (confirm('Excluir esta tarefa?')) deleteTaskMutation.mutate(); }} className="text-[#A39E99] hover:text-red-600 hover:bg-red-50 p-1.5 rounded-md transition-colors border border-transparent hover:border-red-100" title="Excluir"><Trash2 size={14} /></button>
+                <>
+                  {isArchived ? (
+                    <>
+                      <button onClick={(e) => { e.stopPropagation(); restoreTaskMutation.mutate(); }} className="text-[#A39E99] hover:text-emerald-600 hover:bg-emerald-50 p-1.5 rounded-md transition-colors border border-transparent hover:border-emerald-100" title="Restaurar"><RotateCcw size={14} /></button>
+                      <button onClick={(e) => { e.stopPropagation(); if (confirm('Excluir permanentemente?')) deleteTaskMutation.mutate(); }} className="text-[#A39E99] hover:text-red-600 hover:bg-red-50 p-1.5 rounded-md transition-colors border border-transparent hover:border-red-100" title="Excluir"><Trash2 size={14} /></button>
+                    </>
+                  ) : (
+                    <button onClick={(e) => { e.stopPropagation(); archiveTaskMutation.mutate(); }} className="text-[#A39E99] hover:text-amber-600 hover:bg-amber-50 p-1.5 rounded-md transition-colors border border-transparent hover:border-amber-100" title="Arquivar"><Archive size={14} /></button>
+                  )}
+                </>
               )}
             </div>
           )}

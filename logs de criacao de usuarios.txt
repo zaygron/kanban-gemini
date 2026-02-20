@@ -1,0 +1,38 @@
+apps/api dev: --- [MOCK EMAIL] ---
+apps/api dev: To: teste@gmail.com
+apps/api dev: Subject: Convite para o Kanban
+apps/api dev: Body:
+apps/api dev: Você foi convidado!
+apps/api dev: Acesse: http://localhost:3000/login?email=teste%40gmail.com
+apps/api dev: Senha Temporária: rmko7pfa
+apps/api dev: Você precisará trocar a senha no primeiro acesso.
+apps/api dev: --------------------
+apps/api dev: --- [MOCK EMAIL] ---
+apps/api dev: To: teste2@gmail.com
+apps/api dev: Subject: Convite para o Kanban
+apps/api dev: Body:
+apps/api dev: Você foi convidado!
+apps/api dev: Acesse: http://localhost:3000/login?email=teste2%40gmail.com
+apps/api dev: Senha Temporária: 4har3kiw
+apps/api dev: Você precisará trocar a senha no primeiro acesso.
+apps/api dev: --------------------
+apps/web dev:  ○ Compiling /board/[id] ...
+apps/web dev:  ✓ Compiled /board/[id] in 1596ms (953 modules)
+apps/api dev: --- [MOCK EMAIL] ---
+apps/api dev: To: alberto@gmail.com
+apps/api dev: Subject: Convite para o Kanban
+apps/api dev: Body:
+apps/api dev: Você foi convidado!
+apps/api dev: Acesse: http://localhost:3000/login?email=alberto%40gmail.com
+apps/api dev: Senha Temporária: hfd5bhzv
+apps/api dev: Você precisará trocar a senha no primeiro acesso.
+apps/api dev: --------------------
+apps/api dev: --- [MOCK EMAIL] ---
+apps/api dev: To: jose@gmail.com
+apps/api dev: Subject: Convite para o Kanban
+apps/api dev: Body:
+apps/api dev: Você foi convidado!
+apps/api dev: Acesse: http://localhost:3000/login?email=jose%40gmail.com
+apps/api dev: Senha Temporária: 49b5hjlp
+apps/api dev: Você precisará trocar a senha no primeiro acesso.
+apps/api dev: --------------------

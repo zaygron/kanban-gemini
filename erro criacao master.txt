@@ -1,0 +1,30 @@
+C:\Kanban-Gemini>npx ts-node apps/api/scripts/promote_master.ts timoteo@falcare.com.br
+Need to install the following packages:
+ts-node@10.9.2
+Ok to proceed? (y) y
+C:\Users\timot\AppData\Local\npm-cache\_npx\1bf7c3c15bf47d04\node_modules\ts-node\src\index.ts:859
+    return new TSError(diagnosticText, diagnosticCodes, diagnostics);
+           ^
+TSError: ⨯ Unable to compile TypeScript:
+apps/api/scripts/promote_master.ts:20:17 - error TS2353: Object literal may only specify known properties, and 'role' does not exist in type '(Without<UserUpdateInput, UserUncheckedUpdateInput> & UserUncheckedUpdateInput) | (Without<...> & UserUpdateInput)'.
+
+20         data: { role: 'MASTER' },
+                   ~~~~
+
+  node_modules/.pnpm/@prisma+client@5.22.0_prisma@5.22.0/node_modules/.prisma/client/index.d.ts:2535:5
+    2535     data: XOR<UserUpdateInput, UserUncheckedUpdateInput>
+             ~~~~
+    The expected type comes from property 'data' which is declared here on type '{ select?: UserSelect<DefaultArgs> | null | undefined; include?: UserInclude<DefaultArgs> | null | undefined; data: (Without<UserUpdateInput, UserUncheckedUpdateInput> & UserUncheckedUpdateInput) | (Without<...> & UserUpdateInput); where: UserWhereUniqueInput; }'
+
+    at createTSError (C:\Users\timot\AppData\Local\npm-cache\_npx\1bf7c3c15bf47d04\node_modules\ts-node\src\index.ts:859:12)
+    at reportTSError (C:\Users\timot\AppData\Local\npm-cache\_npx\1bf7c3c15bf47d04\node_modules\ts-node\src\index.ts:863:19)
+    at getOutput (C:\Users\timot\AppData\Local\npm-cache\_npx\1bf7c3c15bf47d04\node_modules\ts-node\src\index.ts:1077:36)
+    at Object.compile (C:\Users\timot\AppData\Local\npm-cache\_npx\1bf7c3c15bf47d04\node_modules\ts-node\src\index.ts:1433:41)
+    at Module.m._compile (C:\Users\timot\AppData\Local\npm-cache\_npx\1bf7c3c15bf47d04\node_modules\ts-node\src\index.ts:1617:30)
+    at node:internal/modules/cjs/loader:1936:10
+    at Object.require.extensions.<computed> [as .ts] (C:\Users\timot\AppData\Local\npm-cache\_npx\1bf7c3c15bf47d04\node_modules\ts-node\src\index.ts:1621:12)
+    at Module.load (node:internal/modules/cjs/loader:1525:32)
+    at Module._load (node:internal/modules/cjs/loader:1327:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14) {
+  diagnosticCodes: [ 2353 ]
+}

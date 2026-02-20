@@ -6,20 +6,25 @@ import { api } from '@/lib/api';
 import { Board } from '@/components/board/Board';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Loader2, LayoutDashboard, Edit2, UserPlus, LogOut } from 'lucide-react';
+import { ArrowLeft, Loader2, LayoutDashboard, Edit2, UserPlus, LogOut, Archive, ArchiveRestore } from 'lucide-react';
 import { ShareModal } from '@/components/board/ShareModal';
 
 export default function BoardPage() {
   const { id } = useParams();
   const router = useRouter();
   const queryClient = useQueryClient();
-  
+
   const [isEditingBoard, setIsEditingBoard] = useState(false);
   const [boardName, setBoardName] = useState('');
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
 
   const { data: user } = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get('/me')).data.user });
-  const { data, isLoading, isError } = useQuery({ queryKey: ['board', id], queryFn: async () => (await api.get(`/kanban/board/${id}`)).data, retry: false });
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['board', id, showArchived],
+    queryFn: async () => (await api.get(`/kanban/board/${id}?includeArchived=${showArchived}`)).data,
+    retry: false
+  });
   const { data: membersData } = useQuery({ queryKey: ['boardMembers', id], queryFn: async () => (await api.get(`/kanban/board/${id}/members`)).data, enabled: !!data });
 
   useEffect(() => { if (isError) router.replace('/'); }, [isError, router]);
@@ -57,7 +62,7 @@ export default function BoardPage() {
             )}
           </div>
         </div>
-        
+
         <div className="flex items-center gap-3 md:gap-4">
           <div className="flex items-center gap-3 pr-3 md:pr-4 border-r border-white/20">
             {membersData && (
@@ -76,6 +81,10 @@ export default function BoardPage() {
             )}
             <button onClick={() => setIsShareModalOpen(true)} className="flex items-center gap-1.5 text-sm font-semibold text-white bg-white/10 border border-white/20 px-3 py-1.5 rounded-xl hover:bg-white/20 transition-colors shadow-sm">
               <UserPlus size={16} /> <span className="hidden sm:inline">Equipe</span>
+            </button>
+            <button onClick={() => setShowArchived(!showArchived)} className={`flex items-center gap-1.5 text-sm font-semibold px-3 py-1.5 rounded-xl transition-colors shadow-sm ${showArchived ? 'bg-amber-400 text-[#7A1D22] border-amber-500' : 'text-white bg-white/10 border border-white/20 hover:bg-white/20'}`} title={showArchived ? "Ocultar itens arquivados" : "Mostrar itens arquivados"}>
+              {showArchived ? <ArchiveRestore size={16} /> : <Archive size={16} />}
+              <span className="hidden sm:inline">{showArchived ? 'Ocultar Arquivados' : 'Ver Arquivados'}</span>
             </button>
           </div>
 
@@ -96,10 +105,10 @@ export default function BoardPage() {
           )}
         </div>
       </header>
-      
+
       {/* 🔥 IDENTIDADE: Fundo Bege Quente Liso (Sem Textura para parecer App Desktop) */}
       <main className="flex-1 p-6 overflow-x-auto overflow-y-hidden bg-[#F4F1ED]">
-        <Board initialData={data} />
+        <Board initialData={data} showArchived={showArchived} />
       </main>
 
       {isShareModalOpen && <ShareModal boardId={id as string} onClose={() => setIsShareModalOpen(false)} isOwner={isOwner} />}

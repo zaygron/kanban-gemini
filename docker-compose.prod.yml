@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: kanban_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kanban_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kanban_password}
+      POSTGRES_DB: ${POSTGRES_DB:-kanban_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: kanban_api
+    restart: always
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-kanban_user}:${POSTGRES_PASSWORD:-kanban_password}@postgres:5432/${POSTGRES_DB:-kanban_db}
+      JWT_SECRET: ${JWT_SECRET:-supersecretkey}
+      PORT: 3001
+      # Mail/SMTP config would go here
+    ports:
+      - "3001:3001"
+    depends_on:
+      - postgres
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: kanban_web
+    restart: always
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
