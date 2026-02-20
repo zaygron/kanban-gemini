@@ -1,9 +1,17 @@
 import axios from 'axios';
 
 const getBaseUrl = () => {
-  if (typeof window !== 'undefined') {
-    return window.location.origin.replace(':3000', ':3001');
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL;
   }
+
+  if (typeof window !== 'undefined') {
+    // Tenta deduzir a porta localmente se rodando servidor de desenvolvimento dev sem .env
+    return window.location.origin.includes('3000')
+      ? window.location.origin.replace(':3000', ':3001')
+      : 'http://localhost:3001';
+  }
+
   return 'http://localhost:3001';
 };
 
