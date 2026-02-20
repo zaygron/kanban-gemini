@@ -12,19 +12,24 @@ export class MailService {
         const user = process.env.SMTP_USER;
         const pass = process.env.SMTP_PASS;
 
-        if (host && port && user && pass) {
-            this.transporter = nodemailer.createTransport({
+        if (host && port) {
+            const transportConfig: nodemailer.TransportOptions = {
                 host,
                 port,
                 secure: port === 465, // true for 465, false for other ports
-                auth: {
+            };
+
+            if (user && pass) {
+                transportConfig.auth = {
                     user,
                     pass,
-                },
-            });
-            this.logger.log(`Serviço SMTP configurado em ${host}:${port} com o usuário ${user}`);
+                };
+            }
+
+            this.transporter = nodemailer.createTransport(transportConfig);
+            this.logger.log(`Serviço SMTP configurado em ${host}:${port} ${user ? `com o usuário ${user}` : '(Sem autenticação / Relay IP)'}`);
         } else {
-            this.logger.warn('SMTP não configurado (Faltam variáveis de ambiente). E-mails serão simulados no console.');
+            this.logger.warn('SMTP não configurado (Faltam variáveis HOST/PORT). E-mails serão simulados no console.');
         }
     }
 
