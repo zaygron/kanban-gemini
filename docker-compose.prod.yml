@@ -24,7 +24,7 @@ services:
       PORT: 3001
       # Mail/SMTP config would go here
     ports:
-      - "3001:3001"
+      - "3002:3001"
     depends_on:
       - postgres
 
