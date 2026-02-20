@@ -40,6 +40,7 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
 COPY --from=builder /app/apps/api/prisma ./apps/api/prisma
+COPY --from=builder /app/apps/api/scripts ./apps/api/scripts
 COPY --from=builder /app/packages/shared ./packages/shared
 # Copy necessary node_modules for individual app if pnpm structured differently, 
 # but usually root node_modules is sufficient for monorepo if hoisted.
