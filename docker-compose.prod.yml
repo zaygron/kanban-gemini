@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kanban_password}
       POSTGRES_DB: ${POSTGRES_DB:-kanban_db}
     ports:
-      - "5433:5432"
+      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 
@@ -24,7 +24,7 @@ services:
       PORT: 3001
       # Mail/SMTP config would go here
     ports:
-      - "3002:3001"
+      - "3001:3001"
     depends_on:
       - postgres
 
