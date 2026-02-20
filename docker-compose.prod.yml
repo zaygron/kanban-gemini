@@ -22,7 +22,11 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-kanban_user}:${POSTGRES_PASSWORD:-kanban_password}@postgres:5432/${POSTGRES_DB:-kanban_db}
       JWT_SECRET: ${JWT_SECRET:-supersecretkey}
       PORT: 3001
-      # Mail/SMTP config would go here
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM: ${SMTP_FROM}
     ports:
       - "3001:3001"
     depends_on:
