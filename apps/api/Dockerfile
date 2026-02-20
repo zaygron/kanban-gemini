@@ -2,7 +2,8 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install pnpm
+# Install pnpm and openssl
+RUN apk add --no-cache openssl
 RUN npm install -g pnpm
 
 # Copy root workspace files
@@ -29,6 +30,7 @@ FROM node:20-alpine AS runner
 
 WORKDIR /app
 
+RUN apk add --no-cache openssl
 RUN npm install -g pnpm
 
 # Copy built artifacts and dependencies
