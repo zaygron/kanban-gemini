@@ -1,22 +1,25 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import toast from 'react-hot-toast';
 
 export default function LoginPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const emailFromUrl = searchParams.get('email') || '';
+
   const [isLogin, setIsLogin] = useState(true);
 
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('owner@kanban.com');
-  const [password, setPassword] = useState('123456');
+  const [email, setEmail] = useState(emailFromUrl);
+  const [password, setPassword] = useState('');
   const [mustChangePassword, setMustChangePassword] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [error, setError] = useState('');
 
-  const router = useRouter();
   const queryClient = useQueryClient();
 
   const authMutation = useMutation({
@@ -71,8 +74,7 @@ export default function LoginPage() {
   const toggleMode = () => {
     setIsLogin(!isLogin);
     setError('');
-    // ... rest of toggleMode
-    if (isLogin) { setEmail(''); setPassword(''); } else { setEmail('owner@kanban.com'); setPassword('123456'); }
+    setPassword('');
   };
 
   return (
