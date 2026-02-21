@@ -63,8 +63,8 @@ model Membership {
   createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
   revokedAt  DateTime? @map("revoked_at") @db.Timestamptz
 
-  board Board @relation(fields: [boardId], references: [id])
-  user  User  @relation(fields: [userId], references: [id])
+  board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([boardId, userId])
   @@map("memberships")
