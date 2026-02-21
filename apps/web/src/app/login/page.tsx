@@ -10,10 +10,6 @@ export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const emailFromUrl = searchParams.get('email') || '';
-
-  const [isLogin, setIsLogin] = useState(true);
-
-  const [name, setName] = useState('');
   const [email, setEmail] = useState(emailFromUrl);
   const [password, setPassword] = useState('');
   const [mustChangePassword, setMustChangePassword] = useState(false);
@@ -24,13 +20,8 @@ export default function LoginPage() {
 
   const authMutation = useMutation({
     mutationFn: async () => {
-      if (isLogin) {
-        const { data } = await api.post('/auth/login', { email, password });
-        return data;
-      } else {
-        const { data } = await api.post('/auth/register', { name, email, password });
-        return data;
-      }
+      const { data } = await api.post('/auth/login', { email, password });
+      return data;
     },
     onSuccess: (data) => {
       localStorage.setItem('kanban_token', data.token);
@@ -71,18 +62,12 @@ export default function LoginPage() {
     }
   };
 
-  const toggleMode = () => {
-    setIsLogin(!isLogin);
-    setError('');
-    setPassword('');
-  };
-
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-100 p-4">
       <div className="max-w-md w-full p-8 bg-white rounded-xl shadow-lg border border-slate-200 transition-all">
         <h2 className="text-3xl font-bold text-center text-slate-900 mb-2">Kanban v2</h2>
         <p className="text-center text-slate-500 mb-6 text-sm">
-          {mustChangePassword ? '🔒 Criação de Nova Senha' : (isLogin ? 'Entre com suas credenciais' : 'Crie sua conta')}
+          {mustChangePassword ? '🔒 Criação de Nova Senha' : 'Entre com suas credenciais'}
         </p>
 
         {error && (
@@ -100,13 +85,6 @@ export default function LoginPage() {
             </div>
           ) : (
             <>
-              {!isLogin && (
-                <div className="animate-in fade-in slide-in-from-top-2 duration-300">
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Nome Completo</label>
-                  <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex: João da Silva" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition" required />
-                </div>
-              )}
-
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">E-mail</label>
                 <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="seu@email.com" className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition" required disabled={mustChangePassword} />
@@ -120,20 +98,9 @@ export default function LoginPage() {
           )}
 
           <button type="submit" disabled={authMutation.isPending || changePasswordMutation.isPending} className={`w-full font-semibold py-2.5 rounded-lg transition-colors disabled:opacity-50 mt-2 shadow-sm ${mustChangePassword ? 'bg-violet-600 hover:bg-violet-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}>
-            {authMutation.isPending || changePasswordMutation.isPending ? 'Processando...' : (mustChangePassword ? 'Salvar Nova Senha' : (isLogin ? 'Entrar' : 'Criar Conta'))}
+            {authMutation.isPending || changePasswordMutation.isPending ? 'Processando...' : (mustChangePassword ? 'Salvar Nova Senha' : 'Entrar')}
           </button>
         </form>
-
-        {!mustChangePassword && (
-          <div className="mt-6 text-center border-t border-slate-100 pt-4">
-            <p className="text-sm text-slate-600">
-              {isLogin ? 'Ainda não tem conta?' : 'Já tem uma conta?'}
-              <button type="button" onClick={toggleMode} className="ml-1 text-blue-600 hover:text-blue-800 font-semibold transition-colors focus:outline-none">
-                {isLogin ? 'Crie uma agora' : 'Faça login aqui'}
-              </button>
-            </p>
-          </div>
-        )}
       </div>
     </div>
   );
