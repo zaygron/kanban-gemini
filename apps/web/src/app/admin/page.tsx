@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { api } from '@/lib/api';
-import { Shield, UserPlus, Users, ArrowLeft, Mail, Trash2 } from 'lucide-react';
+import { Shield, UserPlus, Users, ArrowLeft, Mail, Lock, Unlock } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 export default function AdminPage() {
@@ -65,13 +65,13 @@ export default function AdminPage() {
         onError: (err: any) => toast.error(err.response?.data?.message || 'Erro ao atualizar cargo.')
     });
 
-    const deleteUserMutation = useMutation({
+    const toggleActiveMutation = useMutation({
         mutationFn: async (id: string) => await api.delete(`/users/${id}`),
-        onSuccess: () => {
-            toast.success('Usuário removido.');
+        onSuccess: (res: any) => {
+            toast.success(res?.data?.message || 'Status do usuário alterado.');
             usersQuery.refetch();
         },
-        onError: (err: any) => toast.error(err.response?.data?.message || 'Erro ao remover usuário.')
+        onError: (err: any) => toast.error(err.response?.data?.message || 'Erro ao alterar status do usuário.')
     });
 
     const handleRoleChange = (id: string, role: string) => {
@@ -80,9 +80,10 @@ export default function AdminPage() {
         }
     };
 
-    const handleDeleteUser = (id: string) => {
-        if (confirm('ATENÇÃO: Isso removerá o usuário e TODOS os seus dados permanentemente. Continuar?')) {
-            deleteUserMutation.mutate(id);
+    const handleToggleActive = (id: string, isActive: boolean) => {
+        const action = isActive ? 'INATIVAR' : 'REATIVAR';
+        if (confirm(`ATENÇÃO: Deseja realmente ${action} este usuário?`)) {
+            toggleActiveMutation.mutate(id);
         }
     };
 
@@ -184,14 +185,17 @@ export default function AdminPage() {
                                 ) : usersQuery.isError ? (
                                     <tr><td colSpan={4} className="px-8 py-8 text-center text-red-500">Erro ao carregar usuários.</td></tr>
                                 ) : usersQuery.data?.users.map((u: any) => (
-                                    <tr key={u.id} className="hover:bg-slate-50/50 transition-colors group">
+                                    <tr key={u.id} className={`hover:bg-slate-50/50 transition-colors group ${!u.isActive ? 'opacity-60 saturate-50' : ''}`}>
                                         <td className="px-8 py-4">
                                             <div className="flex items-center gap-3">
-                                                <div className="w-9 h-9 rounded-full bg-slate-200 flex items-center justify-center text-slate-600 font-bold text-xs">
+                                                <div className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs ${u.isActive ? 'bg-slate-200 text-slate-600' : 'bg-red-100 text-red-600'}`}>
                                                     {u.name.substring(0, 2).toUpperCase()}
                                                 </div>
                                                 <div>
-                                                    <div className="font-semibold text-slate-800">{u.name}</div>
+                                                    <div className="font-semibold text-slate-800 flex items-center gap-2">
+                                                        {u.name}
+                                                        {!u.isActive && <span className="text-[10px] bg-red-100 text-red-600 px-2 py-0.5 rounded-full uppercase tracking-wider">Inativo</span>}
+                                                    </div>
                                                     <div className="text-xs text-slate-500">{u.email}</div>
                                                 </div>
                                             </div>
@@ -200,8 +204,8 @@ export default function AdminPage() {
                                             <select
                                                 value={u.role}
                                                 onChange={(e) => handleRoleChange(u.id, e.target.value)}
-                                                disabled={u.id === user.id || (user.role === 'ADMIN' && u.role === 'MASTER')}
-                                                className={`text-xs font-bold px-2 py-1 rounded-md border-0 bg-transparent cursor-pointer outline-none focus:ring-2 focus:ring-blue-500 transition-all ${u.role === 'MASTER' ? 'text-violet-700 bg-violet-50' :
+                                                disabled={u.id === user.id || (user.role === 'ADMIN' && u.role === 'MASTER') || !u.isActive}
+                                                className={`text-xs font-bold px-2 py-1 rounded-md border-0 bg-transparent cursor-pointer outline-none focus:ring-2 focus:ring-blue-500 transition-all ${!u.isActive ? 'cursor-not-allowed opacity-70' : ''} ${u.role === 'MASTER' ? 'text-violet-700 bg-violet-50' :
                                                     u.role === 'ADMIN' ? 'text-blue-700 bg-blue-50' : 'text-slate-600 bg-slate-100'
                                                     }`}
                                             >
@@ -215,12 +219,12 @@ export default function AdminPage() {
                                         </td>
                                         <td className="px-6 py-4 text-right">
                                             <button
-                                                onClick={() => handleDeleteUser(u.id)}
+                                                onClick={() => handleToggleActive(u.id, u.isActive)}
                                                 disabled={user.role !== 'MASTER' || u.id === user.id}
-                                                className="text-slate-300 hover:text-red-500 transition-colors disabled:opacity-30 disabled:hover:text-slate-300 disabled:cursor-not-allowed"
-                                                title={user.role === 'MASTER' ? "Remover Usuário" : "Apenas Masters podem remover"}
+                                                className={`transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${u.isActive ? 'text-slate-400 hover:text-red-500' : 'text-red-500 hover:text-green-600'}`}
+                                                title={user.role !== 'MASTER' ? "Apenas Masters podem alterar status" : u.isActive ? "Inativar Usuário" : "Reativar Usuário"}
                                             >
-                                                <Trash2 size={18} />
+                                                {u.isActive ? <Lock size={18} /> : <Unlock size={18} />}
                                             </button>
                                         </td>
                                     </tr>
