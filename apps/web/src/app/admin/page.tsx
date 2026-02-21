@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { api } from '@/lib/api';
-import { Shield, UserPlus, Users, ArrowLeft, Mail, Lock, Unlock } from 'lucide-react';
+import { Shield, UserPlus, Users, ArrowLeft, Mail, Lock, Unlock, Send } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 export default function AdminPage() {
@@ -74,6 +74,14 @@ export default function AdminPage() {
         onError: (err: any) => toast.error(err.response?.data?.message || 'Erro ao alterar status do usuário.')
     });
 
+    const resendInviteMutation = useMutation({
+        mutationFn: async (id: string) => await api.post('/auth/resend-invite', { userId: id }),
+        onSuccess: (res: any) => {
+            toast.success(res?.data?.message || 'Convite reenviado!');
+        },
+        onError: (err: any) => toast.error(err.response?.data?.message || 'Erro ao reenviar convite.')
+    });
+
     const handleRoleChange = (id: string, role: string) => {
         if (confirm('Tem certeza que deseja alterar o cargo deste usuário?')) {
             updateRoleMutation.mutate({ id, role });
@@ -84,6 +92,12 @@ export default function AdminPage() {
         const action = isActive ? 'INATIVAR' : 'REATIVAR';
         if (confirm(`ATENÇÃO: Deseja realmente ${action} este usuário?`)) {
             toggleActiveMutation.mutate(id);
+        }
+    };
+
+    const handleResendInvite = (id: string) => {
+        if (confirm('Deseja gerar uma nova senha temporária e reenviar o e-mail de convite para este usuário?')) {
+            resendInviteMutation.mutate(id);
         }
     };
 
@@ -217,7 +231,16 @@ export default function AdminPage() {
                                         <td className="px-6 py-4 text-sm text-slate-500">
                                             {new Date(u.createdAt).toLocaleDateString('pt-BR')}
                                         </td>
-                                        <td className="px-6 py-4 text-right">
+                                        <td className="px-6 py-4 flex items-center justify-end gap-3 h-full pt-6">
+                                            <button
+                                                onClick={() => handleResendInvite(u.id)}
+                                                disabled={!u.isActive || resendInviteMutation.isPending}
+                                                className="text-slate-400 hover:text-blue-600 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                                                title="Reenviar Convite e Gerar Nova Senha"
+                                            >
+                                                <Send size={18} />
+                                            </button>
+
                                             <button
                                                 onClick={() => handleToggleActive(u.id, u.isActive)}
                                                 disabled={user.role !== 'MASTER' || u.id === user.id}

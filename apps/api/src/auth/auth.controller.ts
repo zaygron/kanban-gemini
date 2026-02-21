@@ -68,6 +68,38 @@ export class AuthController {
   }
 
   @UseGuards(KanbanGuard)
+  @Post('resend-invite')
+  async resendInvite(@Request() req: any, @Body() body: { userId: string }) {
+    const inviterId = req.user.sub || req.user.id;
+    const inviter = await this.prisma.user.findUnique({ where: { id: inviterId } });
+
+    if (!inviter || (inviter.role !== 'MASTER' && inviter.role !== 'ADMIN')) {
+      throw new ForbiddenException('Apenas Masters e Admins podem reenviar convites');
+    }
+
+    const targetUser = await this.prisma.user.findUnique({ where: { id: body.userId } });
+    if (!targetUser) throw new NotFoundException('Usuário não encontrado');
+
+    if (inviter.role === 'ADMIN' && targetUser.role !== 'COMMON') {
+      throw new ForbiddenException('Admins só podem reenviar convites para membros Comuns');
+    }
+
+    const tempPassword = Math.random().toString(36).slice(-8);
+    const hash = await bcrypt.hash(tempPassword, 10);
+
+    await this.prisma.user.update({
+      where: { id: targetUser.id },
+      data: { passwordHash: hash, mustChangePassword: true }
+    });
+
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const inviteLink = `${frontendUrl}/login?email=${encodeURIComponent(targetUser.email)}`;
+    await this.mailService.sendInvite(targetUser.email, inviteLink, tempPassword);
+
+    return { success: true, message: 'Convite reenviado!' };
+  }
+
+  @UseGuards(KanbanGuard)
   @Patch('change-password')
   async changePassword(@Request() req: any, @Body() body: { currentPassword?: string, newPassword: string }) {
     const userId = req.user.sub || req.user.id;
