@@ -61,6 +61,7 @@ export class UsersController {
                 name: true,
                 email: true,
                 role: true,
+                isActive: true,
                 createdAt: true
             },
             orderBy: { createdAt: 'desc' }
@@ -102,24 +103,30 @@ export class UsersController {
     }
 
     @Delete(':id')
-    async remove(@Request() req: any, @Param('id') id: string) {
+    async toggleActive(@Request() req: any, @Param('id') id: string) {
         const requesterRole = req.user.role;
         if (requesterRole !== 'MASTER') {
-            throw new ForbiddenException('Apenas Masters podem excluir usuários.');
+            throw new ForbiddenException('Apenas Masters podem ativar/inativar usuários.');
         }
 
         if (req.user.sub === id || req.user.id === id) {
-            throw new ForbiddenException('Você não pode se excluir.');
+            throw new ForbiddenException('Você não pode alterar seu próprio status.');
         }
 
         // Check if user exists
         const target = await this.prisma.user.findUnique({ where: { id } });
         if (!target) throw new NotFoundException('Usuário não encontrado.');
 
-        // Delete (Cascade should handle related data if configured in Prisma, let's check schema.prisma later)
-        // For now we assume standard delete.
-        await this.prisma.user.delete({ where: { id } });
+        // Soft Delete: Toggle isActive
+        const updated = await this.prisma.user.update({
+            where: { id },
+            data: { isActive: !target.isActive }
+        });
 
-        return { success: true, message: 'Usuário removido.' };
+        return {
+            success: true,
+            message: updated.isActive ? 'Usuário reativado com sucesso.' : 'Usuário inativado com sucesso.',
+            isActive: updated.isActive
+        };
     }
 }

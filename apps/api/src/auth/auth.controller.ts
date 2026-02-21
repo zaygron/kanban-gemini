@@ -96,6 +96,10 @@ export class AuthController {
     const user = await this.prisma.user.findUnique({ where: { email: body.email } });
     if (!user) throw new UnauthorizedException('Credenciais inválidas.');
 
+    if (!user.isActive) {
+      throw new ForbiddenException('Sua conta foi desativada. Entre em contato com o administrador.');
+    }
+
     const isMatch = await bcrypt.compare(body.password, user.passwordHash);
     if (!isMatch) throw new UnauthorizedException('Credenciais inválidas.');
 
@@ -108,6 +112,7 @@ export class AuthController {
         name: user.name,
         email: user.email,
         role: user.role,
+        isActive: user.isActive,
         mustChangePassword: user.mustChangePassword
       }
     };
