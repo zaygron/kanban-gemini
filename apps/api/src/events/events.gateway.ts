@@ -5,23 +5,23 @@ import { PrismaService } from '../prisma/prisma.service';
 import * as cookie from 'cookie';
 import { randomUUID } from 'crypto';
 
-@WebSocketGateway({ cors: { origin: 'http://localhost:3000', credentials: true } })
+@WebSocketGateway({ cors: { origin: ['http://localhost:3000', 'http://31.97.28.113:3000'], credentials: true } })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server!: Server;
 
-  constructor(private jwtService: JwtService, private prisma: PrismaService) {}
+  constructor(private jwtService: JwtService, private prisma: PrismaService) { }
 
   // Autenticação no aperto de mão (Handshake) usando cookie HttpOnly
   async handleConnection(client: Socket) {
     try {
       const rawCookie = client.handshake.headers.cookie;
       if (!rawCookie) throw new Error('Cookie não encontrado');
-      
+
       const parsed = cookie.parse(rawCookie);
       const token = parsed.accessToken;
       if (!token) throw new Error('Token não encontrado');
-      
+
       const payload = await this.jwtService.verifyAsync(token, { secret: 'kanban_secret_v2' });
       client.data.user = payload; // Salva a sessão autenticada na conexão do socket
     } catch (err) {
