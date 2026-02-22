@@ -24,7 +24,7 @@ export class AppController {
     if (userRole === 'MASTER') {
       return this.prisma.board.findMany({
         orderBy: { createdAt: 'desc' },
-        include: { members: true } // Include members to show badges correctly on frontend
+        include: { members: true, createdBy: { select: { name: true } } } // Include members to show badges correctly on frontend
       });
     }
 
@@ -36,7 +36,7 @@ export class AppController {
         ]
       },
       orderBy: { createdAt: 'desc' },
-      include: { members: true }
+      include: { members: true, createdBy: { select: { name: true } } }
     });
   }
 
