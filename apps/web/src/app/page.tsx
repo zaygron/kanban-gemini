@@ -121,7 +121,7 @@ export default function Home() {
                     <span className="text-blue-600 bg-blue-50 px-2 py-1 rounded-md border border-blue-100 flex items-center gap-1 font-bold"><Crown size={12} /> Seu Projeto</span>
                   ) : board.members?.some((m: any) => m.userId === userData.id) ? (
                     <span className="text-emerald-700 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-200 flex items-center gap-1 font-bold"><ShieldAlert size={12} /> Compartilhado</span>
-                  ) : (userData.role === 'MASTER' || userData.role === 'ADMIN') ? (
+                  ) : (userData.role === 'MASTER') ? (
                     <span className="text-amber-700 bg-amber-50 px-2 py-1 rounded-md border border-amber-200 flex items-center gap-1 font-bold"><Shield size={12} /> Supervisão</span>
                   ) : null}
                   <span className="group-hover:translate-x-1 transition-transform">Entrar &rarr;</span>
