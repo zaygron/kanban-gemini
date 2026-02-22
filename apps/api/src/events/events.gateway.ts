@@ -5,7 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import * as cookie from 'cookie';
 import { randomUUID } from 'crypto';
 
-@WebSocketGateway({ cors: { origin: ['http://localhost:3000', 'http://31.97.28.113:3000'], credentials: true } })
+@WebSocketGateway({ cors: { origin: ['http://localhost:3000', 'http://31.97.28.113:3000', 'https://app.falcare.com.br'], credentials: true } })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server!: Server;
