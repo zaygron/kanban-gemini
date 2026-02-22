@@ -21,7 +21,7 @@ export class AppController {
     const userId = req.user?.sub || req.user?.id;
     const userRole = req.user?.role;
 
-    if (userRole === 'MASTER' || userRole === 'ADMIN') {
+    if (userRole === 'MASTER') {
       return this.prisma.board.findMany({
         orderBy: { createdAt: 'desc' },
         include: { members: true } // Include members to show badges correctly on frontend
