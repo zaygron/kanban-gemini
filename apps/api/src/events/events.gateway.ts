@@ -12,15 +12,22 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   constructor(private jwtService: JwtService, private prisma: PrismaService) { }
 
-  // Autenticação no aperto de mão (Handshake) usando cookie HttpOnly
+  // Autenticação no aperto de mão (Handshake)
   async handleConnection(client: Socket) {
     try {
-      const rawCookie = client.handshake.headers.cookie;
-      if (!rawCookie) throw new Error('Cookie não encontrado');
+      // O front envia via socket.auth = { token: '...' }
+      let token = client.handshake.auth?.token;
 
-      const parsed = cookie.parse(rawCookie);
-      const token = parsed.accessToken;
-      if (!token) throw new Error('Token não encontrado');
+      // Fallback para Cookie (se existir no futuro)
+      if (!token && client.handshake.headers.cookie) {
+        const parsed = cookie.parse(client.handshake.headers.cookie);
+        token = parsed.accessToken;
+      }
+
+      if (!token) {
+        console.error('Socket recusado: Token não encontrado na conexão');
+        throw new Error('Token não encontrado');
+      }
 
       const payload = await this.jwtService.verifyAsync(token, { secret: 'kanban_secret_v2' });
       client.data.user = payload; // Salva a sessão autenticada na conexão do socket

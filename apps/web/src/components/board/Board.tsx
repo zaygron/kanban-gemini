@@ -30,9 +30,17 @@ export function Board({ initialData, showArchived }: { initialData: any, showArc
   useEffect(() => { if (boardData?.columns) setColumns(boardData.columns); }, [boardData]);
 
   useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('kanban_token') : null;
+    socket.auth = { token };
     socket.connect();
+
+    socket.emit('board.join', { boardId: initialData.id });
+
     socket.on('boardUpdated', (data) => { if (data.boardId === initialData.id) queryClient.invalidateQueries({ queryKey: ['board', initialData.id] }); });
-    return () => { socket.off('boardUpdated'); };
+    return () => {
+      socket.off('boardUpdated');
+      socket.disconnect();
+    };
   }, [initialData.id, queryClient]);
 
   const updateTaskPosition = useMutation({
