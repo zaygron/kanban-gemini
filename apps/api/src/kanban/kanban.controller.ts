@@ -40,7 +40,17 @@ export class KanbanController {
           include: {
             cards: {
               where: includeArchived ? {} : { archivedAt: null },
-              orderBy: { rank: 'asc' }
+              orderBy: { rank: 'asc' },
+              include: {
+                checklists: {
+                  include: {
+                    items: {
+                      orderBy: { createdAt: 'asc' }
+                    }
+                  },
+                  orderBy: { createdAt: 'asc' }
+                }
+              }
             }
           },
           orderBy: { rank: 'asc' }
@@ -58,7 +68,8 @@ export class KanbanController {
         tasks: list.cards.map((card: any) => ({
           id: card.id, title: card.title, order: parseFloat(card.rank), columnId: card.listId,
           description: card.description, priority: card.priority, startDate: card.startDate, dueDate: card.dueDate, assignedTo: card.assignedTo,
-          archivedAt: card.archivedAt
+          archivedAt: card.archivedAt,
+          checklists: card.checklists || []
         }))
       }))
     };
@@ -306,5 +317,110 @@ export class KanbanController {
       details: log.payload,
       createdAt: log.createdAt
     }));
+  }
+
+  // ==========================================
+  // CHECKLISTS
+  // ==========================================
+
+  @Post('tasks/:id/checklists')
+  async createChecklist(@Param('id') id: string, @Request() req: any, @Body() body: { title: string }) {
+    const userId = req.user.sub || req.user.id;
+    const card = await this.prisma.card.findUnique({ where: { id } });
+    if (!card) throw new NotFoundException('Cartão não encontrado.');
+
+    const { isOwner, isMember, isRestricted, isMaster } = await this.getPermissions(userId, card.boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
+    if (isRestricted && card.assignedTo !== userId && !isMaster) {
+      throw new ForbiddenException('Acesso restrito: Você só pode modificar cartões atribuídos a você.');
+    }
+
+    const checklist = await this.prisma.checklist.create({
+      data: { title: body.title, cardId: id }
+    });
+
+    this.events.server.emit('boardUpdated', { boardId: card.boardId });
+    return checklist;
+  }
+
+  @Delete('checklists/:id')
+  async deleteChecklist(@Param('id') id: string, @Request() req: any) {
+    const userId = req.user.sub || req.user.id;
+    const checklist = await this.prisma.checklist.findUnique({ where: { id }, include: { card: true } });
+    if (!checklist) throw new NotFoundException('Checklist não encontrado.');
+
+    const { isOwner, isMember, isRestricted, isMaster } = await this.getPermissions(userId, checklist.card.boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
+    if (isRestricted && checklist.card.assignedTo !== userId && !isMaster) {
+      throw new ForbiddenException('Acesso restrito: Você só pode modificar cartões atribuídos a você.');
+    }
+
+    await this.prisma.checklist.delete({ where: { id } });
+    this.events.server.emit('boardUpdated', { boardId: checklist.card.boardId });
+    return { success: true };
+  }
+
+  @Post('checklists/:id/items')
+  async createChecklistItem(@Param('id') id: string, @Request() req: any, @Body() body: { title: string }) {
+    const userId = req.user.sub || req.user.id;
+    const checklist = await this.prisma.checklist.findUnique({ where: { id }, include: { card: true } });
+    if (!checklist) throw new NotFoundException('Checklist não encontrado.');
+
+    const { isOwner, isMember, isRestricted, isMaster } = await this.getPermissions(userId, checklist.card.boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
+    if (isRestricted && checklist.card.assignedTo !== userId && !isMaster) {
+      throw new ForbiddenException('Acesso restrito: Você só pode modificar cartões atribuídos a você.');
+    }
+
+    const item = await this.prisma.checklistItem.create({
+      data: { title: body.title, checklistId: id }
+    });
+
+    this.events.server.emit('boardUpdated', { boardId: checklist.card.boardId });
+    return item;
+  }
+
+  @Patch('checklist-items/:id')
+  async updateChecklistItem(@Param('id') id: string, @Request() req: any, @Body() body: { title?: string, isCompleted?: boolean }) {
+    const userId = req.user.sub || req.user.id;
+    const itemCheck = await this.prisma.checklistItem.findUnique({ where: { id }, include: { checklist: { include: { card: true } } } });
+    if (!itemCheck) throw new NotFoundException('Item não encontrado.');
+
+    const boardId = itemCheck.checklist.card.boardId;
+    const assignee = itemCheck.checklist.card.assignedTo;
+
+    const { isOwner, isMember, isRestricted, isMaster } = await this.getPermissions(userId, boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
+    if (isRestricted && assignee !== userId && !isMaster) {
+      throw new ForbiddenException('Acesso restrito: Você só pode modificar cartões atribuídos a você.');
+    }
+
+    const data: any = {};
+    if (body.title !== undefined) data.title = body.title;
+    if (body.isCompleted !== undefined) data.isCompleted = body.isCompleted;
+
+    const item = await this.prisma.checklistItem.update({ where: { id }, data });
+    this.events.server.emit('boardUpdated', { boardId });
+    return item;
+  }
+
+  @Delete('checklist-items/:id')
+  async deleteChecklistItem(@Param('id') id: string, @Request() req: any) {
+    const userId = req.user.sub || req.user.id;
+    const itemCheck = await this.prisma.checklistItem.findUnique({ where: { id }, include: { checklist: { include: { card: true } } } });
+    if (!itemCheck) throw new NotFoundException('Item não encontrado.');
+
+    const boardId = itemCheck.checklist.card.boardId;
+    const assignee = itemCheck.checklist.card.assignedTo;
+
+    const { isOwner, isMember, isRestricted, isMaster } = await this.getPermissions(userId, boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
+    if (isRestricted && assignee !== userId && !isMaster) {
+      throw new ForbiddenException('Acesso restrito: Você só pode modificar cartões atribuídos a você.');
+    }
+
+    await this.prisma.checklistItem.delete({ where: { id } });
+    this.events.server.emit('boardUpdated', { boardId });
+    return { success: true };
   }
 }

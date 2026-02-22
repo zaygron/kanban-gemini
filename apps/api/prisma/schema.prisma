@@ -112,6 +112,7 @@ model Card {
   assignee User?   @relation("CardAssignee", fields: [assignedTo], references: [id], onDelete: SetNull)
   creator  User    @relation("CardCreator", fields: [createdById], references: [id], onDelete: Cascade)
   comments Comment[]
+  checklists Checklist[]
 
   @@index([listId, rank])
   @@index([boardId])
@@ -169,4 +170,32 @@ model BoardMember {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([boardId, userId])
+}
+
+model Checklist {
+  id        String   @id @default(uuid()) @db.Uuid
+  title     String
+  cardId    String   @map("card_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  card  Card  @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  items ChecklistItem[]
+
+  @@index([cardId])
+  @@map("checklists")
+}
+
+model ChecklistItem {
+  id          String   @id @default(uuid()) @db.Uuid
+  title       String
+  isCompleted Boolean  @default(false) @map("is_completed")
+  checklistId String   @map("checklist_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  checklist Checklist @relation(fields: [checklistId], references: [id], onDelete: Cascade)
+
+  @@index([checklistId])
+  @@map("checklist_items")
 }
