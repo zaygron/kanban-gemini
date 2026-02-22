@@ -60,7 +60,7 @@ export class AuthController {
     });
 
     // Enviar E-mail
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = process.env.FRONTEND_URL || 'http://31.97.28.113:3000';
     const inviteLink = `${frontendUrl}/login?email=${encodeURIComponent(body.email)}`;
     await this.mailService.sendInvite(body.email, inviteLink, tempPassword);
 
@@ -92,7 +92,7 @@ export class AuthController {
       data: { passwordHash: hash, mustChangePassword: true }
     });
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = process.env.FRONTEND_URL || 'http://31.97.28.113:3000';
     const inviteLink = `${frontendUrl}/login?email=${encodeURIComponent(targetUser.email)}`;
     await this.mailService.sendInvite(targetUser.email, inviteLink, tempPassword);
 
