@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams } from 'next/navigation';
-import { X, Calendar, AlignLeft, Flag, User, ShieldAlert, Archive, Trash2, RotateCcw } from 'lucide-react';
+import { X, Calendar, AlignLeft, Flag, User, ShieldAlert, Archive, Trash2, RotateCcw, MoreVertical, CheckSquare } from 'lucide-react';
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import toast from 'react-hot-toast';
+import { ChecklistSection } from './ChecklistSection';
 
 export function TaskModal({ task, canEdit, onClose }: { task: any, canEdit: boolean, onClose: () => void }) {
   const queryClient = useQueryClient();
@@ -45,6 +46,16 @@ export function TaskModal({ task, canEdit, onClose }: { task: any, canEdit: bool
 
 
   const [activeTab, setActiveTab] = useState<'details' | 'activity'>('details');
+  const [showMenu, setShowMenu] = useState(false);
+
+  const createChecklistMutation = useMutation({
+    mutationFn: async () => await api.post(`/kanban/tasks/${task.id}/checklists`, { title: 'Novo Checklist' }),
+    onSuccess: () => {
+      toast.success('Checklist adicionado');
+      queryClient.invalidateQueries({ queryKey: ['board'] });
+      setShowMenu(false);
+    }
+  });
 
   const { data: activityLogs, isLoading: activityLoading } = useQuery({
     queryKey: ['taskActivity', task.id],
@@ -62,7 +73,33 @@ export function TaskModal({ task, canEdit, onClose }: { task: any, canEdit: bool
           <div className="flex items-center gap-4">
             <h2 className="text-xl font-bold text-slate-800 break-words leading-snug">{task.title}</h2>
           </div>
-          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-full transition-colors shrink-0"><X size={20} /></button>
+          <div className="flex items-center gap-2">
+            {canEdit && (
+              <div className="relative">
+                <button
+                  onClick={() => setShowMenu(!showMenu)}
+                  className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-lg transition-colors shrink-0 flex items-center gap-1"
+                >
+                  <MoreVertical size={20} />
+                </button>
+                {showMenu && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)}></div>
+                    <div className="absolute right-0 top-full mt-1 w-48 bg-white rounded-xl shadow-xl border border-slate-100 z-50 py-1 overflow-hidden animate-in fade-in slide-in-from-top-2">
+                      <button
+                        onClick={() => createChecklistMutation.mutate()}
+                        disabled={createChecklistMutation.isPending}
+                        className="w-full px-4 py-2.5 text-left text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors disabled:opacity-50"
+                      >
+                        <CheckSquare size={16} className="text-blue-500" /> Adicionar Checklist
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+            <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-full transition-colors shrink-0"><X size={20} /></button>
+          </div>
         </div>
 
         {/* Tabs */}
@@ -126,6 +163,11 @@ export function TaskModal({ task, canEdit, onClose }: { task: any, canEdit: bool
               <div className="space-y-3 pt-2 border-t border-slate-100">
                 <label className="flex items-center gap-2 text-sm font-semibold text-slate-700"><AlignLeft size={16} className="text-purple-500" /> Descrição Detalhada</label>
                 <textarea disabled={!canEdit} value={description} onChange={(e) => setDescription(e.target.value)} className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm min-h-[150px] resize-y bg-slate-50 disabled:opacity-70 text-slate-700" />
+              </div>
+
+              {/* CHECKLIST SECTION */}
+              <div className="pt-2 border-t border-slate-100">
+                <ChecklistSection task={task} canEdit={canEdit} />
               </div>
             </div>
           ) : (
