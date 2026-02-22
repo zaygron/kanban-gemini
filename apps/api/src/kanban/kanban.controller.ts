@@ -13,18 +13,20 @@ export class KanbanController {
 
   private async getPermissions(userId: string, boardId: string) {
     const board = await this.prisma.board.findUnique({ where: { id: boardId }, include: { members: true } });
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!board) throw new NotFoundException('Quadro não encontrado.');
     const isOwner = board.createdById === userId;
     const member = board.members.find(m => m.userId === userId);
     const isRestricted = !isOwner && member?.role === 'RESTRICTED';
-    return { isOwner, isMember: !!member, isRestricted, role: isOwner ? 'OWNER' : (member?.role || 'NONE') };
+    const isMaster = user?.role === 'MASTER';
+    return { isOwner, isMember: !!member, isRestricted, isMaster, role: isOwner ? 'OWNER' : (member?.role || (isMaster ? 'SUPERVISION' : 'NONE')) };
   }
 
   @Get('board/:id')
   async getBoard(@Param('id') id: string, @Request() req: any) {
     const userId = req.user?.sub || req.user?.id;
-    const { isOwner, isMember, role } = await this.getPermissions(userId, id);
-    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+    const { isOwner, isMember, isMaster, role } = await this.getPermissions(userId, id);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
 
     // Se o usuário pedir ?includeArchived=true, mostramos tudo. Senão, filtramos.
     const includeArchived = req.query.includeArchived === 'true';
@@ -65,8 +67,8 @@ export class KanbanController {
   @Get('board/:id/members')
   async getMembers(@Param('id') id: string, @Request() req: any) {
     const userId = req.user?.sub || req.user?.id;
-    const { isOwner, isMember } = await this.getPermissions(userId, id);
-    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+    const { isOwner, isMember, isMaster } = await this.getPermissions(userId, id);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
 
     const board = await this.prisma.board.findUnique({ where: { id }, include: { members: { include: { user: true } } } });
     const owner = await this.prisma.user.findUnique({ where: { id: board?.createdById } });
@@ -117,8 +119,8 @@ export class KanbanController {
   @Post('columns')
   async createColumn(@Request() req: any, @Body() body: { title: string; boardId: string; order: number }) {
     const userId = req.user?.sub || req.user?.id;
-    const { isOwner, isMember, isRestricted } = await this.getPermissions(userId, body.boardId);
-    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+    const { isOwner, isMember, isRestricted, isMaster } = await this.getPermissions(userId, body.boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
     if (isRestricted) throw new ForbiddenException('Acesso Restrito: Você não pode criar listas.');
 
     const list = await this.prisma.list.create({ data: { title: body.title, boardId: body.boardId, rank: toRank(body.order) } });
@@ -133,8 +135,8 @@ export class KanbanController {
     const listCheck = await this.prisma.list.findUnique({ where: { id } });
     if (!listCheck) throw new NotFoundException();
 
-    const { isOwner, isMember, isRestricted } = await this.getPermissions(userId, listCheck.boardId);
-    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+    const { isOwner, isMember, isRestricted, isMaster } = await this.getPermissions(userId, listCheck.boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
     if (isRestricted) throw new ForbiddenException('Acesso Restrito: Você não pode alterar listas.');
 
     const data: any = {};
@@ -152,8 +154,8 @@ export class KanbanController {
     const list = await this.prisma.list.findUnique({ where: { id: body.columnId } });
     if (!list) throw new NotFoundException();
 
-    const { isOwner, isMember, isRestricted } = await this.getPermissions(userId, list.boardId);
-    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+    const { isOwner, isMember, isRestricted, isMaster } = await this.getPermissions(userId, list.boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
     if (isRestricted) throw new ForbiddenException('Acesso Restrito: Você não pode criar tarefas.');
 
     const card = await this.prisma.card.create({
@@ -169,8 +171,8 @@ export class KanbanController {
     const cardCheck = await this.prisma.card.findUnique({ where: { id } });
     if (!cardCheck) throw new NotFoundException();
 
-    const { isOwner, isMember, isRestricted } = await this.getPermissions(userId, cardCheck.boardId);
-    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+    const { isOwner, isMember, isRestricted, isMaster } = await this.getPermissions(userId, cardCheck.boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
 
     if (isRestricted && cardCheck.assignedTo !== userId) {
       throw new ForbiddenException('Você só tem permissão para mover ou editar tarefas atribuídas a você.');
@@ -242,8 +244,8 @@ export class KanbanController {
     const cardCheck = await this.prisma.card.findUnique({ where: { id } });
     if (!cardCheck) throw new NotFoundException();
 
-    const { isOwner, isMember } = await this.getPermissions(userId, cardCheck.boardId);
-    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+    const { isOwner, isMember, isMaster } = await this.getPermissions(userId, cardCheck.boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
 
     const card = await this.prisma.card.update({ where: { id }, data: { archivedAt: new Date() } });
     this.events.server.emit('boardUpdated', { boardId: card.boardId });
@@ -258,8 +260,8 @@ export class KanbanController {
     const cardCheck = await this.prisma.card.findUnique({ where: { id } });
     if (!cardCheck) throw new NotFoundException();
 
-    const { isOwner, isMember } = await this.getPermissions(userId, cardCheck.boardId);
-    if (!isOwner && !isMember) throw new UnauthorizedException('Acesso negado.');
+    const { isOwner, isMember, isMaster } = await this.getPermissions(userId, cardCheck.boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException('Acesso negado.');
 
     const card = await this.prisma.card.update({ where: { id }, data: { archivedAt: null } });
 
@@ -274,9 +276,9 @@ export class KanbanController {
     const card = await this.prisma.card.findUnique({ where: { id } });
     if (!card) throw new NotFoundException();
 
-    const { isOwner, isMember, isRestricted } = await this.getPermissions(userId, card.boardId);
-    if (!isOwner && !isMember) throw new UnauthorizedException();
-    if (isRestricted) throw new ForbiddenException('Acesso Negado: Apenas o criador do quadro pode deletar tarefas.');
+    const { isOwner, isMember, isRestricted, isMaster } = await this.getPermissions(userId, card.boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException();
+    if (isRestricted && !isMaster) throw new ForbiddenException('Acesso Negado: Apenas o criador do quadro pode deletar tarefas.');
 
     await this.prisma.card.delete({ where: { id } });
     this.events.server.emit('boardUpdated', { boardId: card.boardId });
@@ -289,8 +291,8 @@ export class KanbanController {
     const card = await this.prisma.card.findUnique({ where: { id } });
     if (!card) throw new NotFoundException();
 
-    const { isOwner, isMember } = await this.getPermissions(userId, card.boardId);
-    if (!isOwner && !isMember) throw new UnauthorizedException();
+    const { isOwner, isMember, isMaster } = await this.getPermissions(userId, card.boardId);
+    if (!isOwner && !isMember && !isMaster) throw new UnauthorizedException();
 
     const logs = await this.prisma.activityLog.findMany({
       where: { entityId: id, entityType: 'CARD' },
